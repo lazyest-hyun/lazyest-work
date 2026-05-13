@@ -1,0 +1,30 @@
+/target/
+/.build/
+/dist/
+/macos/GWSMenuBar/.build/
+/.DS_Store
+*.xcuserdata/
+
+# macOS / Xcode local state
+*.xcuserstate
+*.xccheckout
+DerivedData/
+
+# Local env and credentials
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.mobileprovision
+GoogleService-Info.plist
+credentials*.json
+client_secret*.json
+
+# Runtime and editor noise
+*.log
+*.tmp
+*.swp
+
+# Generated local brand assets. Do not commit third-party product icons.
+/macos/GWSMenuBar/Sources/GWSMenuBar/Resources/WorkspaceIcons/*.png
