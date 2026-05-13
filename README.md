@@ -74,18 +74,27 @@ Paste the Client ID into GWS Menu and click **Save Setup**. GWS Menu updates the
 
 Do not use **Web application** or **Desktop app** credentials. If Google shows a `client_secret`, it is the wrong credential type. GWS Menu does not use or store a client secret.
 
+After sign-in, GWS Menu shows a small **Finish setup** card for optional features:
+
+- **Meeting alerts**: asks for macOS notification permission only when you enable it.
+- **Gmail badge**: asks for Gmail unread-count permission only when you enable it.
+- **Open at login**: adds GWS Menu to macOS Login Items.
+
 ## Settings
 
-Open Settings from the gear button in GWS Menu.
+Open Settings from the gear button in GWS Menu. Changes save automatically.
 
 - **Calendar**: choose desktop alert timing.
 - **Mail**: enable or disable the Gmail unread badge.
-- **Workspace apps**: add, remove, reorder, or reset shortcuts.
+- **General**: enable Open at login or open the GitHub repository.
+- **Account**: sign out of Google.
 - **Google setup**: reset the saved Client ID and URL scheme if you need to start over.
+
+To customize Workspace shortcuts, click the sliders button next to the **Workspace** label on the main menu. The editor uses the same grid layout as the menu.
 
 ## Updating
 
-Pull the latest code and run the same installer again:
+Open **Settings -> General -> GitHub repository**, then update manually from the repo:
 
 ```bash
 git pull
@@ -107,6 +116,7 @@ The installer closes any running `GWSMenu` process, replaces `~/Applications/GWS
 
 - **`client_secret` error**: delete that OAuth client and create an `iOS` OAuth client instead.
 - **Sign-in opens and immediately closes**: open **Setup**, save the current Client ID once, then sign in again.
+- **Meeting alerts do not appear**: allow GWS Menu in **System Settings -> Notifications**, then enable Meeting alerts again.
 - **Old behavior after updating**: rerun the installer command; it restarts the menu app after replacing it.
 - **Need icons only**:
 

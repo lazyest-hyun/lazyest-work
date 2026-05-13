@@ -3,6 +3,7 @@ import Combine
 import Foundation
 import GTMAppAuth
 import ObjectiveC
+import ServiceManagement
 import SwiftUI
 import UniformTypeIdentifiers
 @preconcurrency import GoogleSignIn
@@ -32,17 +33,26 @@ final class AppModel: ObservableObject {
             MailBadgeSettings.saveEnabled(mailBadgeEnabled)
         }
     }
+    @Published var launchAtLoginEnabled: Bool
+    @Published var setupChecklistDismissed: Bool {
+        didSet {
+            SetupChecklistSettings.saveDismissed(setupChecklistDismissed)
+        }
+    }
 
     init() {
         alertLeadMinutes = AlertSettings.loadLeadMinutes()
         calendarNotificationsEnabled = AlertSettings.loadCalendarNotificationsEnabled()
         mailBadgeEnabled = MailBadgeSettings.loadEnabled()
+        launchAtLoginEnabled = LaunchAtLoginSettings.isEnabled()
+        setupChecklistDismissed = SetupChecklistSettings.loadDismissed()
     }
 }
 
-enum ErrorRecoveryAction {
+enum ErrorRecoveryAction: Equatable {
     case googleSetup
     case gmailPermission
+    case notificationSettings
 
     var buttonTitle: String {
         switch self {
@@ -50,6 +60,8 @@ enum ErrorRecoveryAction {
             return "Setup"
         case .gmailPermission:
             return "Allow"
+        case .notificationSettings:
+            return "Settings"
         }
     }
 }
@@ -184,7 +196,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.updateNow()
-                await self?.refreshEvents()
+                await self?.refreshEvents(showsActivity: false)
                 await self?.refreshGmailUnread()
             }
         }
@@ -219,18 +231,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 onRefresh: { [weak self] in self?.refreshFromMenu() },
                 onSignOut: { [weak self] in self?.signOut() },
                 onResetGoogleSetup: { [weak self] in self?.resetGoogleSetup() },
+                onDismissSetupChecklist: { [weak self] in self?.dismissSetupChecklist() },
+                onEnableCalendarAlerts: { [weak self] in self?.enableCalendarAlertsFromMenu() },
                 onEnableGmailBadge: { [weak self] in self?.enableGmailBadgeFromMenu() },
+                onEnableLaunchAtLogin: { [weak self] in self?.enableLaunchAtLoginFromMenu() },
                 onApplyGoogleSetup: { [weak self] config in
                     self?.applyGoogleSetup(config) ?? .failure("App is not ready to apply setup.")
                 },
-                onApplySettings: { [weak self] apps, alertLeadMinutes, calendarNotificationsEnabled, mailBadgeEnabled in
-                    self?.applyAppSettings(
-                        apps: apps,
-                        alertLeadMinutes: alertLeadMinutes,
-                        calendarNotificationsEnabled: calendarNotificationsEnabled,
-                        mailBadgeEnabled: mailBadgeEnabled
-                    )
-                },
+                onUpdateWorkspaceApps: { [weak self] apps in self?.updateWorkspaceApps(apps) },
+                onUpdateAlertLeadMinutes: { [weak self] minutes in self?.updateAlertLeadMinutes(minutes) },
+                onUpdateCalendarNotifications: { [weak self] isEnabled in self?.updateCalendarNotificationsEnabled(isEnabled) },
+                onUpdateMailBadge: { [weak self] isEnabled in self?.updateMailBadgeEnabled(isEnabled) },
+                onUpdateLaunchAtLogin: { [weak self] isEnabled in self?.updateLaunchAtLoginEnabled(isEnabled) },
                 onOpenURL: { url in NSWorkspace.shared.open(url) }
             )
         )
@@ -270,6 +282,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     private func restoreAndRefresh() async {
+        refreshLaunchAtLoginState()
         do {
             try await authClient.restorePreviousSignIn()
             model.connectionState = authClient.connectionState()
@@ -284,33 +297,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
     }
 
-    private func refreshEvents() async {
+    private func refreshEvents(showsActivity: Bool = true) async {
         updateNow()
         guard model.connectionState.isConnected else {
-            model.events = []
+            if !model.events.isEmpty {
+                model.events = []
+            }
             refreshUI()
             cancelCalendarNotifications()
             return
         }
 
-        model.isBusy = true
-        model.lastError = nil
-        model.lastErrorRecovery = nil
-        refreshUI()
-
-        do {
-            model.events = try await calendarService.loadUpcomingEvents()
-            model.connectionState = authClient.connectionState()
-        } catch {
-            model.events = []
-            model.lastError = userFacingError(error)
-            model.lastErrorRecovery = .googleSetup
-            model.connectionState = authClient.connectionState()
+        if showsActivity {
+            model.isBusy = true
+            model.lastError = nil
+            model.lastErrorRecovery = nil
+            refreshUI()
         }
 
-        model.isBusy = false
+        var eventsChanged = false
+        do {
+            let loadedEvents = try await calendarService.loadUpcomingEvents()
+            if model.events != loadedEvents {
+                model.events = loadedEvents
+                eventsChanged = true
+            }
+            let connectionState = authClient.connectionState()
+            if model.connectionState != connectionState {
+                model.connectionState = connectionState
+            }
+            if model.lastError != nil || model.lastErrorRecovery != nil {
+                model.lastError = nil
+                model.lastErrorRecovery = nil
+            }
+        } catch {
+            if !model.events.isEmpty {
+                model.events = []
+                eventsChanged = true
+            }
+            let errorMessage = userFacingError(error)
+            if model.lastError != errorMessage {
+                model.lastError = errorMessage
+            }
+            if model.lastErrorRecovery != .googleSetup {
+                model.lastErrorRecovery = .googleSetup
+            }
+            let connectionState = authClient.connectionState()
+            if model.connectionState != connectionState {
+                model.connectionState = connectionState
+            }
+        }
+
+        if showsActivity {
+            model.isBusy = false
+        }
         refreshUI()
-        await syncCalendarNotifications()
+        if eventsChanged {
+            await syncCalendarNotifications()
+        }
     }
 
     private func refreshUI() {
@@ -320,6 +364,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     private func updateNow() {
         model.now = Date()
+    }
+
+    private func refreshLaunchAtLoginState() {
+        model.launchAtLoginEnabled = LaunchAtLoginSettings.isEnabled()
     }
 
     private func updateStatusIcon() {
@@ -475,6 +523,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 try GoogleAppBundleSetup.reset()
                 model.events = []
                 model.gmailUnreadCount = nil
+                model.setupChecklistDismissed = false
                 model.connectionState = .missingBundleConfig
                 cancelCalendarNotifications()
                 refreshUI()
@@ -489,28 +538,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
     }
 
-    private func applyAppSettings(
-        apps: [WorkspaceApp],
-        alertLeadMinutes: Int,
-        calendarNotificationsEnabled: Bool,
-        mailBadgeEnabled: Bool
-    ) {
+    private func updateWorkspaceApps(_ apps: [WorkspaceApp]) {
+        guard model.workspaceApps != apps else { return }
         model.workspaceApps = apps
-        model.alertLeadMinutes = alertLeadMinutes
-        model.calendarNotificationsEnabled = calendarNotificationsEnabled
-        model.mailBadgeEnabled = mailBadgeEnabled
+        WorkspaceAppStore.save(apps)
+        refreshUI()
+    }
+
+    private func updateAlertLeadMinutes(_ minutes: Int) {
+        guard model.alertLeadMinutes != minutes else { return }
+        model.alertLeadMinutes = minutes
         model.lastError = nil
         model.lastErrorRecovery = nil
-        WorkspaceAppStore.save(apps)
+        refreshUI()
+        Task {
+            await syncCalendarNotifications()
+        }
+    }
+
+    private func updateCalendarNotificationsEnabled(_ isEnabled: Bool) {
+        guard model.calendarNotificationsEnabled != isEnabled else { return }
+        model.calendarNotificationsEnabled = isEnabled
+        model.lastError = nil
+        model.lastErrorRecovery = nil
+        refreshUI()
+        Task {
+            await syncCalendarNotifications()
+        }
+    }
+
+    private func updateMailBadgeEnabled(_ isEnabled: Bool) {
+        guard model.mailBadgeEnabled != isEnabled else { return }
+        model.mailBadgeEnabled = isEnabled
+        model.lastError = nil
+        model.lastErrorRecovery = nil
         refreshUI()
 
         Task {
-            await syncCalendarNotifications()
-            if mailBadgeEnabled {
+            if isEnabled {
                 await enableGmailUnreadBadge()
             } else {
                 model.gmailUnreadCount = nil
+                refreshUI()
             }
+        }
+    }
+
+    private func updateLaunchAtLoginEnabled(_ isEnabled: Bool) {
+        model.lastError = nil
+        model.lastErrorRecovery = nil
+        applyLaunchAtLoginSetting(isEnabled)
+        refreshUI()
+    }
+
+    private func applyLaunchAtLoginSetting(_ isEnabled: Bool) {
+        guard model.launchAtLoginEnabled != isEnabled else { return }
+        do {
+            try LaunchAtLoginSettings.setEnabled(isEnabled)
+            model.launchAtLoginEnabled = LaunchAtLoginSettings.isEnabled()
+        } catch {
+            model.launchAtLoginEnabled = LaunchAtLoginSettings.isEnabled()
+            model.lastError = userFacingError(error)
+            model.lastErrorRecovery = nil
         }
     }
 
@@ -526,7 +615,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         } catch {
             model.calendarNotificationsEnabled = false
             model.lastError = userFacingError(error)
-            model.lastErrorRecovery = .googleSetup
+            model.lastErrorRecovery = .notificationSettings
             cancelCalendarNotifications()
             refreshUI()
         }
@@ -618,6 +707,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
     }
 
+    private func enableCalendarAlertsFromMenu() {
+        guard model.connectionState.isConnected else { return }
+        model.calendarNotificationsEnabled = true
+        model.lastError = nil
+        model.lastErrorRecovery = nil
+        model.isBusy = true
+        refreshUI()
+
+        Task {
+            await syncCalendarNotifications()
+            model.isBusy = false
+            refreshUI()
+        }
+    }
+
+    private func enableLaunchAtLoginFromMenu() {
+        model.lastError = nil
+        model.lastErrorRecovery = nil
+        applyLaunchAtLoginSetting(true)
+        refreshUI()
+    }
+
+    private func dismissSetupChecklist() {
+        model.setupChecklistDismissed = true
+        refreshUI()
+    }
+
     private func ensureNotificationAuthorization() async throws {
         let settings = await notificationSettings()
         switch settings.authorizationStatus {
@@ -680,6 +796,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             popover.performClose(sender)
         } else {
             updateNow()
+            refreshLaunchAtLoginState()
             refreshUI()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
@@ -746,7 +863,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             return "Gmail unread badge could not be enabled. Enable Gmail API in Google Cloud, then try the Inbox unread badge setting again."
         }
         if lowercased.contains("notification") {
-            return "macOS notification permission is off. Turn it on in System Settings, then enable the alert again."
+            return "macOS notification permission is off. Open System Settings, allow GWS Menu notifications, then enable Meeting alerts again."
+        }
+        if lowercased.contains("login item") || lowercased.contains("launch") {
+            return "Open at login could not be changed. Check System Settings > General > Login Items."
         }
         if lowercased.contains("access_denied") || lowercased.contains("permission") {
             return "Calendar permission was not granted. Try Sign in again and allow read-only Google Calendar access."
@@ -790,6 +910,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 enum PopoverScreen {
     case home
     case appSettings
+    case workspaceSettings
     case googleSetup
 }
 
@@ -801,9 +922,16 @@ struct GWSMenuPopover: View {
     let onRefresh: () -> Void
     let onSignOut: () -> Void
     let onResetGoogleSetup: () -> Void
+    let onDismissSetupChecklist: () -> Void
+    let onEnableCalendarAlerts: () -> Void
     let onEnableGmailBadge: () -> Void
+    let onEnableLaunchAtLogin: () -> Void
     let onApplyGoogleSetup: (GoogleSetupConfig) -> GoogleSetupResult
-    let onApplySettings: ([WorkspaceApp], Int, Bool, Bool) -> Void
+    let onUpdateWorkspaceApps: ([WorkspaceApp]) -> Void
+    let onUpdateAlertLeadMinutes: (Int) -> Void
+    let onUpdateCalendarNotifications: (Bool) -> Void
+    let onUpdateMailBadge: (Bool) -> Void
+    let onUpdateLaunchAtLogin: (Bool) -> Void
     let onOpenURL: (URL) -> Void
 
     var body: some View {
@@ -812,17 +940,28 @@ struct GWSMenuPopover: View {
             case .home:
                 homeView
             case .appSettings:
-                WorkspaceAppsEditor(
-                    initialApps: model.workspaceApps,
+                AppSettingsView(
+                    connectionState: model.connectionState,
                     initialAlertLeadMinutes: model.alertLeadMinutes,
                     initialCalendarNotificationsEnabled: model.calendarNotificationsEnabled,
                     initialMailBadgeEnabled: model.mailBadgeEnabled,
-                    onCancel: { screen = .home },
+                    initialLaunchAtLoginEnabled: model.launchAtLoginEnabled,
+                    onDone: { screen = .home },
+                    onSignOut: onSignOut,
                     onResetGoogleSetup: onResetGoogleSetup,
-                    onApply: { apps, alertLeadMinutes, calendarNotificationsEnabled, mailBadgeEnabled in
-                        onApplySettings(apps, alertLeadMinutes, calendarNotificationsEnabled, mailBadgeEnabled)
-                        screen = .home
-                    }
+                    onOpenNotificationSettings: openNotificationSettings,
+                    onOpenGitHub: openGitHub,
+                    onUpdateAlertLeadMinutes: onUpdateAlertLeadMinutes,
+                    onUpdateCalendarNotifications: onUpdateCalendarNotifications,
+                    onUpdateMailBadge: onUpdateMailBadge,
+                    onUpdateLaunchAtLogin: onUpdateLaunchAtLogin
+                )
+                .id(editorID)
+            case .workspaceSettings:
+                WorkspaceAppsEditor(
+                    initialApps: model.workspaceApps,
+                    onDone: { screen = .home },
+                    onUpdateApps: onUpdateWorkspaceApps
                 )
                 .id(editorID)
             case .googleSetup:
@@ -835,7 +974,7 @@ struct GWSMenuPopover: View {
             }
         }
         .frame(width: 420, height: 590)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .popoverSurface()
     }
 
     private var homeView: some View {
@@ -843,30 +982,33 @@ struct GWSMenuPopover: View {
             HeaderView(
                 connectionState: model.connectionState,
                 isBusy: model.isBusy,
-                onRefresh: onRefresh
+                onRefresh: onRefresh,
+                onOpenSettings: openAppSettings
             )
 
-            Divider()
+            MenuDivider()
 
             WorkspaceGrid(
                 apps: model.workspaceApps.filter(\.isEnabled),
                 gmailUnreadCount: model.gmailUnreadCount,
+                onManageApps: openWorkspaceSettings,
                 onOpenURL: onOpenURL
             )
             .padding(.horizontal, 16)
             .padding(.top, 14)
             .padding(.bottom, 12)
 
-            Divider()
+            MenuDivider()
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     if let lastError = model.lastError {
-                        let recovery = model.lastErrorRecovery ?? .googleSetup
                         ErrorBanner(
                             message: lastError,
-                            actionTitle: recovery.buttonTitle,
-                            action: { recoverFromError(recovery) }
+                            actionTitle: model.lastErrorRecovery?.buttonTitle,
+                            action: model.lastErrorRecovery.map { recovery in
+                                { recoverFromError(recovery) }
+                            }
                         )
                     }
 
@@ -879,24 +1021,42 @@ struct GWSMenuPopover: View {
                         )
                     }
 
+                    if shouldShowSetupChecklist {
+                        FinishSetupCard(
+                            alertLeadMinutes: model.alertLeadMinutes,
+                            calendarNotificationsEnabled: model.calendarNotificationsEnabled,
+                            mailBadgeEnabled: model.mailBadgeEnabled,
+                            launchAtLoginEnabled: model.launchAtLoginEnabled,
+                            isBusy: model.isBusy,
+                            onEnableCalendarAlerts: onEnableCalendarAlerts,
+                            onEnableGmailBadge: onEnableGmailBadge,
+                            onEnableLaunchAtLogin: onEnableLaunchAtLogin,
+                            onDismiss: onDismissSetupChecklist
+                        )
+                    }
+
                     UpcomingEventsView(events: Array(model.events.prefix(8)), now: model.now, onOpenURL: onOpenURL)
                 }
                 .padding(16)
             }
 
-            Divider()
-
-            FooterView(
-                connectionState: model.connectionState,
-                onSignOut: onSignOut,
-                onManageApps: openAppSettings
-            )
         }
+    }
+
+    private var shouldShowSetupChecklist: Bool {
+        model.connectionState.isConnected &&
+            !model.setupChecklistDismissed &&
+            (!model.calendarNotificationsEnabled || !model.mailBadgeEnabled || !model.launchAtLoginEnabled)
     }
 
     private func openAppSettings() {
         editorID = UUID()
         screen = .appSettings
+    }
+
+    private func openWorkspaceSettings() {
+        editorID = UUID()
+        screen = .workspaceSettings
     }
 
     private func openGoogleSetup() {
@@ -909,7 +1069,107 @@ struct GWSMenuPopover: View {
             openGoogleSetup()
         case .gmailPermission:
             onEnableGmailBadge()
+        case .notificationSettings:
+            openNotificationSettings()
         }
+    }
+
+    private func openNotificationSettings() {
+        guard let url = notificationSettingsURL() else { return }
+        onOpenURL(url)
+    }
+
+    private func openGitHub() {
+        guard let url = URL(string: "https://github.com/hyunn515/gws-menu-app") else { return }
+        onOpenURL(url)
+    }
+
+    private func notificationSettingsURL() -> URL? {
+        let bundleID = Bundle.main.bundleIdentifier ?? "io.github.gwsmenu.app"
+        return URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=\(bundleID)")
+            ?? URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension")
+    }
+}
+
+enum MenuSurfaceStyle {
+    case card
+    case inset
+    case tile
+}
+
+enum MenuAppearance {
+    static func surfaceFill(
+        _ style: MenuSurfaceStyle,
+        colorScheme _: ColorScheme,
+        isDragging: Bool = false
+    ) -> Color {
+        let opacityMultiplier = isDragging ? 0.58 : 1
+
+        switch style {
+        case .card, .tile:
+            return Color(nsColor: .controlBackgroundColor).opacity(opacityMultiplier)
+        case .inset:
+            return Color(nsColor: .windowBackgroundColor).opacity(opacityMultiplier)
+        }
+    }
+
+    static func dividerColor(for _: ColorScheme) -> Color {
+        Color(nsColor: .separatorColor).opacity(0.70)
+    }
+
+    static func semanticFill(_ color: Color, colorScheme: ColorScheme) -> Color {
+        color.opacity(colorScheme == .dark ? 0.16 : 0.12)
+    }
+
+    static func semanticStroke(_ color: Color, colorScheme: ColorScheme) -> Color {
+        color.opacity(colorScheme == .dark ? 0.28 : 0.18)
+    }
+}
+
+struct PopoverSurfaceModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .background(Color(nsColor: .windowBackgroundColor).ignoresSafeArea())
+    }
+}
+
+struct MenuSurfaceModifier: ViewModifier {
+    @Environment(\.colorScheme) private var colorScheme
+    let style: MenuSurfaceStyle
+    let cornerRadius: CGFloat
+    let isDragging: Bool
+
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        return content
+            .background(
+                MenuAppearance.surfaceFill(style, colorScheme: colorScheme, isDragging: isDragging),
+                in: shape
+            )
+    }
+}
+
+extension View {
+    func popoverSurface() -> some View {
+        modifier(PopoverSurfaceModifier())
+    }
+
+    func menuSurface(
+        _ style: MenuSurfaceStyle = .card,
+        cornerRadius: CGFloat = 8,
+        isDragging: Bool = false
+    ) -> some View {
+        modifier(MenuSurfaceModifier(style: style, cornerRadius: cornerRadius, isDragging: isDragging))
+    }
+}
+
+struct MenuDivider: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        Rectangle()
+            .fill(MenuAppearance.dividerColor(for: colorScheme))
+            .frame(height: 1)
     }
 }
 
@@ -917,6 +1177,7 @@ struct HeaderView: View {
     let connectionState: ConnectionState
     let isBusy: Bool
     let onRefresh: () -> Void
+    let onOpenSettings: () -> Void
 
     var body: some View {
         HStack(spacing: 8) {
@@ -944,6 +1205,7 @@ struct HeaderView: View {
 
             IconButton(symbolName: "arrow.clockwise", title: "Refresh", action: onRefresh)
                 .disabled(!connectionState.isConnected || isBusy)
+            IconButton(symbolName: "gearshape", title: "Settings", action: onOpenSettings)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 7)
@@ -1055,7 +1317,114 @@ struct AuthStatusCard: View {
             }
         }
         .padding(14)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+        .menuSurface()
+    }
+}
+
+struct FinishSetupCard: View {
+    let alertLeadMinutes: Int
+    let calendarNotificationsEnabled: Bool
+    let mailBadgeEnabled: Bool
+    let launchAtLoginEnabled: Bool
+    let isBusy: Bool
+    let onEnableCalendarAlerts: () -> Void
+    let onEnableGmailBadge: () -> Void
+    let onEnableLaunchAtLogin: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "checklist")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 22)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Finish setup")
+                        .font(.system(size: 14, weight: .semibold))
+                    Text("Optional settings that make the menu app feel alive.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                IconButton(symbolName: "xmark", title: "Hide setup checklist", action: onDismiss)
+            }
+
+            VStack(spacing: 7) {
+                FinishSetupOptionRow(
+                    title: "Meeting alerts",
+                    subtitle: "Desktop notification \(alertLeadMinutes)m before meetings. Requires macOS Notifications.",
+                    systemImage: "bell.badge",
+                    isEnabled: calendarNotificationsEnabled,
+                    isBusy: isBusy,
+                    action: onEnableCalendarAlerts
+                )
+                FinishSetupOptionRow(
+                    title: "Gmail badge",
+                    subtitle: "Inbox unread count only. No sender, subject, or body.",
+                    systemImage: "envelope.badge",
+                    isEnabled: mailBadgeEnabled,
+                    isBusy: isBusy,
+                    action: onEnableGmailBadge
+                )
+                FinishSetupOptionRow(
+                    title: "Open at login",
+                    subtitle: "Start GWS Menu when you sign in to macOS.",
+                    systemImage: "power",
+                    isEnabled: launchAtLoginEnabled,
+                    isBusy: false,
+                    action: onEnableLaunchAtLogin
+                )
+            }
+        }
+        .padding(12)
+        .menuSurface()
+    }
+}
+
+struct FinishSetupOptionRow: View {
+    let title: String
+    let subtitle: String
+    let systemImage: String
+    let isEnabled: Bool
+    let isBusy: Bool
+    let action: () -> Void
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(systemName: systemImage)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(isEnabled ? .green : Color.accentColor)
+                .frame(width: 20)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(.system(size: 12, weight: .medium))
+                Text(subtitle)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            Spacer(minLength: 8)
+
+            if isEnabled {
+                Label("On", systemImage: "checkmark.circle.fill")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.green)
+            } else {
+                Button("Enable", action: action)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(isBusy)
+            }
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 7)
+        .menuSurface(.inset, cornerRadius: 7)
     }
 }
 
@@ -1093,14 +1462,14 @@ struct AlertLeadSettingRow: View {
                 }
                 .padding(.horizontal, 10)
                 .frame(height: 30)
-                .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                .menuSurface(.inset)
             }
             .menuStyle(.button)
             .buttonStyle(.plain)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+        .menuSurface()
     }
 
     private func optionTitle(_ minutes: Int) -> String {
@@ -1138,7 +1507,47 @@ struct NotificationToggleRow: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+        .menuSurface()
+    }
+}
+
+struct SettingsActionRow: View {
+    let title: String
+    let subtitle: String
+    let systemImage: String
+    let buttonTitle: String
+    let buttonRole: ButtonRole?
+    let isDisabled: Bool
+    let action: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: systemImage)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 22)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 13, weight: .medium))
+                Text(subtitle)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            Spacer(minLength: 8)
+
+            Button(role: buttonRole, action: action) {
+                Text(buttonTitle)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(isDisabled)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .menuSurface()
     }
 }
 
@@ -1165,6 +1574,7 @@ struct EventRow: View {
     let event: MeetingEvent
     let now: Date
     let onOpenURL: (URL) -> Void
+    @Environment(\.colorScheme) private var colorScheme
     @State private var isShowingParticipants = false
 
     var body: some View {
@@ -1178,7 +1588,7 @@ struct EventRow: View {
                     .foregroundStyle(.secondary)
             }
             .frame(width: 58, height: 44)
-            .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+            .menuSurface(.inset)
 
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 5) {
@@ -1202,7 +1612,7 @@ struct EventRow: View {
                             .foregroundStyle(.secondary)
                             .padding(.horizontal, 5)
                             .frame(height: 16)
-                            .background(Color(nsColor: .windowBackgroundColor), in: Capsule())
+                            .background(MenuAppearance.surfaceFill(.inset, colorScheme: colorScheme), in: Capsule())
                         }
                         .buttonStyle(.plain)
                         .help(event.participantToolTip)
@@ -1235,7 +1645,7 @@ struct EventRow: View {
             .frame(width: 60, alignment: .trailing)
         }
         .padding(9)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+        .menuSurface()
     }
 }
 
@@ -1283,7 +1693,7 @@ struct ParticipantList: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
-        .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 7))
+        .menuSurface(.inset, cornerRadius: 7)
     }
 }
 
@@ -1291,11 +1701,17 @@ struct WorkspaceGrid: View {
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 8), count: 4)
     let apps: [WorkspaceApp]
     let gmailUnreadCount: Int?
+    let onManageApps: () -> Void
     let onOpenURL: (URL) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            SectionTitle("Workspace")
+            HStack(spacing: 8) {
+                SectionTitle("Workspace")
+                Spacer()
+                IconButton(symbolName: "slider.horizontal.3", title: "Manage workspace apps", action: onManageApps)
+                    .frame(width: 24, height: 24)
+            }
 
             LazyVGrid(columns: columns, spacing: 8) {
                 ForEach(apps) { app in
@@ -1323,7 +1739,7 @@ struct WorkspaceGrid: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(app.url == nil)
-                    .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                    .menuSurface(.tile)
                 }
             }
         }
@@ -1404,7 +1820,7 @@ struct GoogleSetupView: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 12)
 
-            Divider()
+            MenuDivider()
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
@@ -1508,12 +1924,12 @@ struct GoogleSetupView: View {
                         SetupStep(number: "!", text: "If Google gives you a client secret, you created a Web application credential. Delete that and create the Apple/iOS client instead.")
                     }
                     .padding(10)
-                    .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                    .menuSurface()
                 }
                 .padding(14)
             }
 
-            Divider()
+            MenuDivider()
 
             HStack {
                 Button("Cancel", action: onCancel)
@@ -1649,7 +2065,7 @@ struct SetupInfoRow: View {
                 .truncationMode(.middle)
         }
         .padding(10)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+        .menuSurface()
     }
 }
 
@@ -1697,7 +2113,7 @@ struct CopyableSetupInfoRow: View {
             .help("Copy \(label)")
         }
         .padding(10)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+        .menuSurface()
         .onChange(of: value) { _, _ in
             didCopy = false
         }
@@ -1738,7 +2154,7 @@ struct SetupActionStep: View {
             Spacer(minLength: 0)
         }
         .padding(10)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+        .menuSurface()
     }
 }
 
@@ -1763,126 +2179,282 @@ struct SetupStep: View {
 
 struct SetupFeedbackView: View {
     let result: GoogleSetupResult
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
+        let semanticColor = result.isSuccess ? Color.green : Color.orange
+        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: result.isSuccess ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                .foregroundStyle(result.isSuccess ? .green : .orange)
+                .foregroundStyle(semanticColor)
             Text(result.message)
                 .font(.system(size: 12))
                 .fixedSize(horizontal: false, vertical: true)
             Spacer()
         }
         .padding(10)
-        .background((result.isSuccess ? Color.green : Color.orange).opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+        .background(MenuAppearance.semanticFill(semanticColor, colorScheme: colorScheme), in: shape)
+        .overlay {
+            shape.stroke(MenuAppearance.semanticStroke(semanticColor, colorScheme: colorScheme), lineWidth: 1)
+        }
     }
 }
 
-struct WorkspaceAppsEditor: View {
-    @State private var draftApps: [WorkspaceApp]
+struct AppSettingsView: View {
+    let connectionState: ConnectionState
     @State private var draftAlertLeadMinutes: Int
     @State private var draftCalendarNotificationsEnabled: Bool
     @State private var draftMailBadgeEnabled: Bool
-    @State private var draggingAppID: String?
-    @State private var lastAutoScrollAt = Date.distantPast
+    @State private var draftLaunchAtLoginEnabled: Bool
     @State private var showsResetGoogleSetupConfirmation = false
-    let onCancel: () -> Void
+    let onDone: () -> Void
+    let onSignOut: () -> Void
     let onResetGoogleSetup: () -> Void
-    let onApply: ([WorkspaceApp], Int, Bool, Bool) -> Void
+    let onOpenNotificationSettings: () -> Void
+    let onOpenGitHub: () -> Void
+    let onUpdateAlertLeadMinutes: (Int) -> Void
+    let onUpdateCalendarNotifications: (Bool) -> Void
+    let onUpdateMailBadge: (Bool) -> Void
+    let onUpdateLaunchAtLogin: (Bool) -> Void
 
     init(
-        initialApps: [WorkspaceApp],
+        connectionState: ConnectionState,
         initialAlertLeadMinutes: Int,
         initialCalendarNotificationsEnabled: Bool,
         initialMailBadgeEnabled: Bool,
-        onCancel: @escaping () -> Void,
+        initialLaunchAtLoginEnabled: Bool,
+        onDone: @escaping () -> Void,
+        onSignOut: @escaping () -> Void,
         onResetGoogleSetup: @escaping () -> Void,
-        onApply: @escaping ([WorkspaceApp], Int, Bool, Bool) -> Void
+        onOpenNotificationSettings: @escaping () -> Void,
+        onOpenGitHub: @escaping () -> Void,
+        onUpdateAlertLeadMinutes: @escaping (Int) -> Void,
+        onUpdateCalendarNotifications: @escaping (Bool) -> Void,
+        onUpdateMailBadge: @escaping (Bool) -> Void,
+        onUpdateLaunchAtLogin: @escaping (Bool) -> Void
     ) {
-        _draftApps = State(initialValue: initialApps)
         _draftAlertLeadMinutes = State(initialValue: initialAlertLeadMinutes)
         _draftCalendarNotificationsEnabled = State(initialValue: initialCalendarNotificationsEnabled)
         _draftMailBadgeEnabled = State(initialValue: initialMailBadgeEnabled)
-        self.onCancel = onCancel
+        _draftLaunchAtLoginEnabled = State(initialValue: initialLaunchAtLoginEnabled)
+        self.connectionState = connectionState
+        self.onDone = onDone
+        self.onSignOut = onSignOut
         self.onResetGoogleSetup = onResetGoogleSetup
-        self.onApply = onApply
+        self.onOpenNotificationSettings = onOpenNotificationSettings
+        self.onOpenGitHub = onOpenGitHub
+        self.onUpdateAlertLeadMinutes = onUpdateAlertLeadMinutes
+        self.onUpdateCalendarNotifications = onUpdateCalendarNotifications
+        self.onUpdateMailBadge = onUpdateMailBadge
+        self.onUpdateLaunchAtLogin = onUpdateLaunchAtLogin
     }
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
-                IconButton(symbolName: "chevron.left", title: "Back", action: onCancel)
+                IconButton(symbolName: "chevron.left", title: "Back", action: onDone)
 
                 Text("Settings")
                     .font(.system(size: 17, weight: .semibold))
 
                 Spacer()
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
 
-                IconButton(
-                    symbolName: "key.slash",
-                    title: "Reset Google setup",
-                    action: { showsResetGoogleSetupConfirmation = true }
-                )
+            MenuDivider()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    SectionTitle("General")
+                    NotificationToggleRow(
+                        title: "Open at login",
+                        subtitle: "Start GWS Menu when you sign in to macOS.",
+                        systemImage: "power",
+                        isOn: launchAtLoginBinding
+                    )
+                    SettingsActionRow(
+                        title: "GitHub repository",
+                        subtitle: "Open releases, issues, and source updates.",
+                        systemImage: "chevron.left.forwardslash.chevron.right",
+                        buttonTitle: "Open",
+                        buttonRole: nil,
+                        isDisabled: false,
+                        action: onOpenGitHub
+                    )
+
+                    SectionTitle("Calendar")
+                    NotificationToggleRow(
+                        title: "Desktop alerts",
+                        subtitle: "Use macOS Notifications for meeting reminders.",
+                        systemImage: "bell.badge",
+                        isOn: calendarNotificationsBinding
+                    )
+                    AlertLeadSettingRow(selectedMinutes: alertLeadMinutesBinding)
+                    SettingsActionRow(
+                        title: "Notification settings",
+                        subtitle: "Open this app's macOS notification controls.",
+                        systemImage: "bell.and.waves.left.and.right",
+                        buttonTitle: "Open",
+                        buttonRole: nil,
+                        isDisabled: false,
+                        action: onOpenNotificationSettings
+                    )
+
+                    SectionTitle("Mail")
+                    NotificationToggleRow(
+                        title: "Inbox unread badge",
+                        subtitle: "Shows unread count on Gmail. No desktop mail alerts.",
+                        systemImage: "envelope.badge",
+                        isOn: mailBadgeBinding
+                    )
+
+                    SectionTitle("Account")
+                    SettingsActionRow(
+                        title: "Google account",
+                        subtitle: connectionState.accountLine,
+                        systemImage: "person.crop.circle",
+                        buttonTitle: "Sign Out",
+                        buttonRole: nil,
+                        isDisabled: !connectionState.isConnected,
+                        action: onSignOut
+                    )
+
+                    SectionTitle("Google setup")
+                    SettingsActionRow(
+                        title: "Reset Google setup",
+                        subtitle: "Remove saved setup values and start over.",
+                        systemImage: "key.slash",
+                        buttonTitle: "Reset",
+                        buttonRole: .destructive,
+                        isDisabled: false,
+                        action: { showsResetGoogleSetupConfirmation = true }
+                    )
+                }
+                .padding(10)
+            }
+
+        }
+        .confirmationDialog(
+            "Reset Google setup?",
+            isPresented: $showsResetGoogleSetupConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Reset Google Setup", role: .destructive, action: onResetGoogleSetup)
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This signs out, revokes the saved Google grant if possible, removes the Client ID and URL scheme from this app, then restarts GWS Menu. You will need Open Setup again.")
+        }
+    }
+
+    private var alertLeadMinutesBinding: Binding<Int> {
+        Binding(
+            get: { draftAlertLeadMinutes },
+            set: { newValue in
+                draftAlertLeadMinutes = newValue
+                onUpdateAlertLeadMinutes(newValue)
+            }
+        )
+    }
+
+    private var calendarNotificationsBinding: Binding<Bool> {
+        Binding(
+            get: { draftCalendarNotificationsEnabled },
+            set: { newValue in
+                draftCalendarNotificationsEnabled = newValue
+                onUpdateCalendarNotifications(newValue)
+            }
+        )
+    }
+
+    private var mailBadgeBinding: Binding<Bool> {
+        Binding(
+            get: { draftMailBadgeEnabled },
+            set: { newValue in
+                draftMailBadgeEnabled = newValue
+                onUpdateMailBadge(newValue)
+            }
+        )
+    }
+
+    private var launchAtLoginBinding: Binding<Bool> {
+        Binding(
+            get: { draftLaunchAtLoginEnabled },
+            set: { newValue in
+                draftLaunchAtLoginEnabled = newValue
+                onUpdateLaunchAtLogin(newValue)
+            }
+        )
+    }
+}
+
+struct WorkspaceAppsEditor: View {
+    @State private var draftApps: [WorkspaceApp]
+    @State private var selectedAppID: String?
+    @State private var draggingAppID: String?
+    @State private var lastAutoScrollAt = Date.distantPast
+    let onDone: () -> Void
+    let onUpdateApps: ([WorkspaceApp]) -> Void
+
+    init(
+        initialApps: [WorkspaceApp],
+        onDone: @escaping () -> Void,
+        onUpdateApps: @escaping ([WorkspaceApp]) -> Void
+    ) {
+        _draftApps = State(initialValue: initialApps)
+        _selectedAppID = State(initialValue: initialApps.first?.id)
+        self.onDone = onDone
+        self.onUpdateApps = onUpdateApps
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                IconButton(symbolName: "chevron.left", title: "Back", action: onDone)
+
+                Text("Workspace")
+                    .font(.system(size: 17, weight: .semibold))
+
+                Text("\(draftApps.filter(\.isEnabled).count) visible")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+
                 IconButton(symbolName: "plus", title: "Add app", action: addCustomApp)
                 IconButton(symbolName: "arrow.counterclockwise", title: "Reset apps", action: resetDefaults)
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 12)
 
-            Divider()
+            MenuDivider()
 
             ScrollViewReader { proxy in
                 ZStack {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 10) {
-                            SectionTitle("Calendar")
-                            NotificationToggleRow(
-                                title: "Desktop alerts",
-                                subtitle: "Use macOS notifications for meeting reminders.",
-                                systemImage: "bell.badge",
-                                isOn: $draftCalendarNotificationsEnabled
-                            )
-                            AlertLeadSettingRow(selectedMinutes: $draftAlertLeadMinutes)
-
-                            SectionTitle("Mail")
-                            NotificationToggleRow(
-                                title: "Inbox unread badge",
-                                subtitle: "Shows unread count on Gmail. No desktop mail alerts.",
-                                systemImage: "envelope.badge",
-                                isOn: $draftMailBadgeEnabled
-                            )
-
                             SectionTitle("Workspace Apps")
 
-                            ForEach(draftApps) { listedApp in
-                                if let index = draftApps.firstIndex(where: { $0.id == listedApp.id }) {
-                                    WorkspaceAppEditorRow(
-                                        app: appBinding(index),
-                                        isDragging: draggingAppID == listedApp.id,
-                                        canMoveUp: index > 0,
-                                        canMoveDown: index < draftApps.count - 1,
-                                        canDelete: !draftApps[index].isBuiltIn,
-                                        onMoveUp: { move(index: index, offset: -1) },
-                                        onMoveDown: { move(index: index, offset: 1) },
-                                        onMoveToTop: { moveToTop(index: index) },
-                                        onMoveToBottom: { moveToBottom(index: index) },
-                                        onDelete: { delete(index: index) },
-                                        onDrag: {
-                                            draggingAppID = listedApp.id
-                                            return NSItemProvider(object: listedApp.id as NSString)
-                                        }
-                                    )
-                                    .id(listedApp.id)
-                                    .onDrop(
-                                        of: [UTType.text],
-                                        delegate: WorkspaceAppReorderDropDelegate(
-                                            targetID: listedApp.id,
-                                            apps: $draftApps,
-                                            draggingID: $draggingAppID
-                                        )
-                                    )
-                                }
+                            if let selectedIndex {
+                                WorkspaceAppDetailEditor(
+                                    app: appBinding(selectedIndex),
+                                    canDelete: !draftApps[selectedIndex].isBuiltIn,
+                                    canMoveUp: selectedIndex > 0,
+                                    canMoveDown: selectedIndex < draftApps.count - 1,
+                                    onMoveToTop: { moveToTop(index: selectedIndex) },
+                                    onMoveUp: { move(index: selectedIndex, offset: -1) },
+                                    onMoveDown: { move(index: selectedIndex, offset: 1) },
+                                    onMoveToBottom: { moveToBottom(index: selectedIndex) },
+                                    onDelete: { delete(index: selectedIndex) }
+                                )
                             }
+
+                            WorkspaceAppsGridEditor(
+                                apps: $draftApps,
+                                selectedAppID: $selectedAppID,
+                                draggingAppID: $draggingAppID
+                            )
                         }
                         .padding(10)
                     }
@@ -1914,48 +2486,19 @@ struct WorkspaceAppsEditor: View {
                     }
                 }
             }
-
-            Divider()
-
-            VStack(spacing: 8) {
-                HStack {
-                    Text(WorkspaceAppStore.configURL.path)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Spacer()
+            .onChange(of: draftApps) { _, newValue in
+                if !newValue.contains(where: { $0.id == selectedAppID }) {
+                    selectedAppID = newValue.first?.id
                 }
-
-                HStack {
-                    Button("Cancel", action: onCancel)
-                    Spacer()
-
-                    Text("\(draftApps.filter(\.isEnabled).count) visible")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-
-                    Button {
-                        onApply(draftApps, draftAlertLeadMinutes, draftCalendarNotificationsEnabled, draftMailBadgeEnabled)
-                    } label: {
-                        Text("Apply")
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
+                onUpdateApps(newValue)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
+
         }
-        .confirmationDialog(
-            "Reset Google setup?",
-            isPresented: $showsResetGoogleSetupConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button("Reset Google Setup", role: .destructive, action: onResetGoogleSetup)
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This signs out, revokes the saved Google grant if possible, removes the Client ID and URL scheme from this app, then restarts GWS Menu. You will need Open Setup again.")
-        }
+    }
+
+    private var selectedIndex: Int? {
+        guard let selectedAppID else { return nil }
+        return draftApps.firstIndex(where: { $0.id == selectedAppID })
     }
 
     private func appBinding(_ index: Int) -> Binding<WorkspaceApp> {
@@ -1968,11 +2511,14 @@ struct WorkspaceAppsEditor: View {
     }
 
     private func addCustomApp() {
-        draftApps.append(WorkspaceApp.custom())
+        let app = WorkspaceApp.custom()
+        draftApps.append(app)
+        selectedAppID = app.id
     }
 
     private func resetDefaults() {
         draftApps = WorkspaceApp.defaultApps
+        selectedAppID = draftApps.first?.id
     }
 
     private func move(index: Int, offset: Int) {
@@ -1982,6 +2528,7 @@ struct WorkspaceAppsEditor: View {
             return
         }
         draftApps.swapAt(index, target)
+        selectedAppID = draftApps[target].id
     }
 
     private func moveToTop(index: Int) {
@@ -1990,6 +2537,7 @@ struct WorkspaceAppsEditor: View {
         }
         let app = draftApps.remove(at: index)
         draftApps.insert(app, at: 0)
+        selectedAppID = app.id
     }
 
     private func moveToBottom(index: Int) {
@@ -1998,6 +2546,7 @@ struct WorkspaceAppsEditor: View {
         }
         let app = draftApps.remove(at: index)
         draftApps.append(app)
+        selectedAppID = app.id
     }
 
     private func delete(index: Int) {
@@ -2006,85 +2555,181 @@ struct WorkspaceAppsEditor: View {
             return
         }
         draftApps.remove(at: index)
+        selectedAppID = draftApps.indices.contains(index) ? draftApps[index].id : draftApps.last?.id
     }
 }
 
-struct WorkspaceAppEditorRow: View {
-    @Binding var app: WorkspaceApp
+struct WorkspaceAppsGridEditor: View {
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 8), count: 4)
+    @Binding var apps: [WorkspaceApp]
+    @Binding var selectedAppID: String?
+    @Binding var draggingAppID: String?
+
+    var body: some View {
+        LazyVGrid(columns: columns, spacing: 8) {
+            ForEach(apps) { listedApp in
+                if let index = apps.firstIndex(where: { $0.id == listedApp.id }) {
+                    WorkspaceAppEditorTile(
+                        app: apps[index],
+                        isSelected: selectedAppID == listedApp.id,
+                        isDragging: draggingAppID == listedApp.id,
+                        canDelete: !apps[index].isBuiltIn,
+                        onSelect: { selectedAppID = listedApp.id },
+                        onToggleEnabled: {
+                            selectedAppID = listedApp.id
+                            apps[index].isEnabled.toggle()
+                        },
+                        onDelete: {
+                            delete(index: index)
+                        },
+                        onDrag: {
+                            selectedAppID = listedApp.id
+                            draggingAppID = listedApp.id
+                            return NSItemProvider(object: listedApp.id as NSString)
+                        }
+                    )
+                    .id(listedApp.id)
+                    .onDrop(
+                        of: [UTType.text],
+                        delegate: WorkspaceAppReorderDropDelegate(
+                            targetID: listedApp.id,
+                            apps: $apps,
+                            draggingID: $draggingAppID
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    private func delete(index: Int) {
+        guard apps.indices.contains(index), !apps[index].isBuiltIn else { return }
+        apps.remove(at: index)
+        selectedAppID = apps.indices.contains(index) ? apps[index].id : apps.last?.id
+    }
+}
+
+struct WorkspaceAppEditorTile: View {
+    let app: WorkspaceApp
+    let isSelected: Bool
     let isDragging: Bool
-    let canMoveUp: Bool
-    let canMoveDown: Bool
     let canDelete: Bool
-    let onMoveUp: () -> Void
-    let onMoveDown: () -> Void
-    let onMoveToTop: () -> Void
-    let onMoveToBottom: () -> Void
+    let onSelect: () -> Void
+    let onToggleEnabled: () -> Void
     let onDelete: () -> Void
     let onDrag: () -> NSItemProvider
 
     var body: some View {
+        VStack(spacing: 6) {
+            WorkspaceProductIcon(app: app)
+                .frame(width: 24, height: 24)
+                .frame(width: 36, height: 28)
+
+            Text(app.title.nilIfBlank ?? "Untitled")
+                .font(.system(size: 11, weight: .medium))
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        .frame(maxWidth: .infinity, minHeight: 70)
+        .opacity(app.isEnabled ? 1 : 0.45)
+        .contentShape(RoundedRectangle(cornerRadius: 8))
+        .onTapGesture(perform: onSelect)
+        .onDrag(onDrag)
+        .menuSurface(.tile, isDragging: isDragging)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 2)
+        )
+        .overlay(alignment: .topLeading) {
+            Button(action: onToggleEnabled) {
+                Image(systemName: app.isEnabled ? "eye.fill" : "eye.slash")
+                    .font(.system(size: 10, weight: .bold))
+                    .frame(width: 20, height: 20)
+            }
+            .buttonStyle(.borderless)
+            .help(app.isEnabled ? "Hide app" : "Show app")
+        }
+        .overlay(alignment: .topTrailing) {
+            if canDelete {
+                Button(action: onDelete) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 11, weight: .bold))
+                        .frame(width: 20, height: 20)
+                }
+                .buttonStyle(.borderless)
+                .help("Delete custom app")
+            }
+        }
+        .help("Click to edit. Drag to reorder.")
+    }
+}
+
+struct WorkspaceAppDetailEditor: View {
+    @Binding var app: WorkspaceApp
+    let canDelete: Bool
+    let canMoveUp: Bool
+    let canMoveDown: Bool
+    let onMoveToTop: () -> Void
+    let onMoveUp: () -> Void
+    let onMoveDown: () -> Void
+    let onMoveToBottom: () -> Void
+    let onDelete: () -> Void
+
+    var body: some View {
         VStack(spacing: 8) {
             HStack(spacing: 8) {
-                Image(systemName: "line.3.horizontal")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 18, height: 32)
-                    .contentShape(Rectangle())
-                    .onDrag(onDrag)
-                    .help("Drag to reorder")
-
-                Toggle("", isOn: binding(\.isEnabled))
-                    .labelsHidden()
-
                 WorkspaceProductIcon(app: app)
                     .frame(width: 24, height: 24)
                     .frame(width: 32, height: 32)
-                    .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                    .menuSurface(.inset)
 
-                TextField("Name", text: binding(\.title))
-                    .textFieldStyle(.roundedBorder)
-
-                HStack(spacing: 2) {
-                    Menu {
-                        Button(action: onMoveToTop) {
-                            Label("Move to Top", systemImage: "arrow.up.to.line")
-                        }
-                        .disabled(!canMoveUp)
-
-                        Button(action: onMoveUp) {
-                            Label("Move Up", systemImage: "chevron.up")
-                        }
-                        .disabled(!canMoveUp)
-
-                        Button(action: onMoveDown) {
-                            Label("Move Down", systemImage: "chevron.down")
-                        }
-                        .disabled(!canMoveDown)
-
-                        Button(action: onMoveToBottom) {
-                            Label("Move to Bottom", systemImage: "arrow.down.to.line")
-                        }
-                        .disabled(!canMoveDown)
-                    } label: {
-                        Image(systemName: "arrow.up.arrow.down")
-                            .font(.system(size: 13, weight: .semibold))
-                            .frame(width: 28, height: 28)
-                    }
-                    .menuStyle(.button)
-                    .buttonStyle(.borderless)
-                    .help("Move")
-
-                    IconButton(symbolName: "trash", title: "Delete custom app", action: onDelete)
-                        .disabled(!canDelete)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(app.title.nilIfBlank ?? "Untitled")
+                        .font(.system(size: 13, weight: .semibold))
+                        .lineLimit(1)
+                    Text(app.urlString.nilIfBlank ?? "No URL")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
-                .frame(width: 60)
+
+                Spacer()
+
+                Toggle("Visible", isOn: binding(\.isEnabled))
+                    .font(.system(size: 11, weight: .medium))
+                    .toggleStyle(.switch)
             }
+
+            TextField("Name", text: binding(\.title))
+                .textFieldStyle(.roundedBorder)
 
             TextField("URL", text: binding(\.urlString))
                 .textFieldStyle(.roundedBorder)
+
+            HStack(spacing: 4) {
+                IconButton(symbolName: "arrow.up.to.line", title: "Move to top", action: onMoveToTop)
+                    .disabled(!canMoveUp)
+                IconButton(symbolName: "chevron.up", title: "Move up", action: onMoveUp)
+                    .disabled(!canMoveUp)
+                IconButton(symbolName: "chevron.down", title: "Move down", action: onMoveDown)
+                    .disabled(!canMoveDown)
+                IconButton(symbolName: "arrow.down.to.line", title: "Move to bottom", action: onMoveToBottom)
+                    .disabled(!canMoveDown)
+
+                Spacer()
+
+                if canDelete {
+                    Button(role: .destructive, action: onDelete) {
+                        Label("Delete", systemImage: "trash")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+            }
         }
-        .padding(8)
-        .background(Color(nsColor: .controlBackgroundColor).opacity(isDragging ? 0.62 : 1), in: RoundedRectangle(cornerRadius: 8))
+        .padding(10)
+        .menuSurface()
     }
 
     private func binding<Value>(_ keyPath: WritableKeyPath<WorkspaceApp, Value>) -> Binding<Value> {
@@ -2242,30 +2887,6 @@ struct WorkspaceAppAutoScrollDropDelegate: DropDelegate {
     }
 }
 
-struct FooterView: View {
-    let connectionState: ConnectionState
-    let onSignOut: () -> Void
-    let onManageApps: () -> Void
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Button(action: onManageApps) {
-                Label("Settings", systemImage: "gearshape")
-            }
-            .buttonStyle(.borderless)
-
-            Spacer()
-
-            if connectionState.isConnected {
-                Button("Sign Out", action: onSignOut)
-                    .buttonStyle(.borderless)
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-    }
-}
-
 struct StatusCard: View {
     let symbolName: String
     let title: String
@@ -2296,7 +2917,7 @@ struct StatusCard: View {
             }
         }
         .padding(14)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+        .menuSurface()
     }
 }
 
@@ -2304,6 +2925,7 @@ struct ErrorBanner: View {
     let message: String
     let actionTitle: String?
     let action: (() -> Void)?
+    @Environment(\.colorScheme) private var colorScheme
 
     init(message: String, actionTitle: String? = nil, action: (() -> Void)? = nil) {
         self.message = message
@@ -2312,6 +2934,8 @@ struct ErrorBanner: View {
     }
 
     var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+
         HStack(spacing: 8) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.orange)
@@ -2325,7 +2949,10 @@ struct ErrorBanner: View {
             }
         }
         .padding(10)
-        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+        .background(MenuAppearance.semanticFill(.orange, colorScheme: colorScheme), in: shape)
+        .overlay {
+            shape.stroke(MenuAppearance.semanticStroke(.orange, colorScheme: colorScheme), lineWidth: 1)
+        }
     }
 }
 
@@ -2590,11 +3217,39 @@ enum MailBadgeSettings {
     }
 }
 
+enum LaunchAtLoginSettings {
+    static func isEnabled() -> Bool {
+        SMAppService.mainApp.status == .enabled
+    }
+
+    static func setEnabled(_ isEnabled: Bool) throws {
+        if isEnabled {
+            guard SMAppService.mainApp.status != .enabled else { return }
+            try SMAppService.mainApp.register()
+        } else {
+            guard SMAppService.mainApp.status == .enabled else { return }
+            try SMAppService.mainApp.unregister()
+        }
+    }
+}
+
+enum SetupChecklistSettings {
+    private static let dismissedKey = "setupChecklistDismissed"
+
+    static func loadDismissed() -> Bool {
+        UserDefaults.standard.bool(forKey: dismissedKey)
+    }
+
+    static func saveDismissed(_ isDismissed: Bool) {
+        UserDefaults.standard.set(isDismissed, forKey: dismissedKey)
+    }
+}
+
 enum NotificationNamespaces {
     static let calendar = "gws.calendar."
 }
 
-enum ConnectionState {
+enum ConnectionState: Equatable {
     case loading
     case missingBundleConfig
     case signedOut
@@ -3016,7 +3671,7 @@ struct GoogleEventPerson: Decodable {
     }
 }
 
-struct MeetingParticipant: Identifiable {
+struct MeetingParticipant: Identifiable, Equatable {
     let id: String
     let label: String
     let email: String?
@@ -3150,7 +3805,7 @@ struct GoogleEventDate: Decodable {
     let date: String?
 }
 
-struct MeetingEvent {
+struct MeetingEvent: Equatable {
     let id: String
     let title: String
     let start: Date
@@ -3765,6 +4420,7 @@ extension Bundle {
 
         return nil
     }
+
 }
 
 extension String {

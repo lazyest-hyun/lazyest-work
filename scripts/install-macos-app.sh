@@ -56,12 +56,54 @@ if [[ "$INSTALL_SCOPE" == "system" ]]; then
 else
   INSTALL_DIR="$HOME/Applications"
 fi
+DEST_APP="$INSTALL_DIR/$APP_NAME"
+INFO_PLIST="$DEST_APP/Contents/Info.plist"
+PLIST_BUDDY="/usr/libexec/PlistBuddy"
 
+read_info_value() {
+  local key="$1"
+  [[ -f "$INFO_PLIST" && -x "$PLIST_BUDDY" ]] || return 0
+  "$PLIST_BUDDY" -c "Print :$key" "$INFO_PLIST" 2>/dev/null || true
+}
+
+read_google_url_scheme() {
+  [[ -f "$INFO_PLIST" && -x "$PLIST_BUDDY" ]] || return 0
+  local type_index scheme_index scheme
+  for type_index in {0..20}; do
+    for scheme_index in {0..20}; do
+      scheme="$("$PLIST_BUDDY" -c "Print :CFBundleURLTypes:$type_index:CFBundleURLSchemes:$scheme_index" "$INFO_PLIST" 2>/dev/null || true)"
+      if [[ "$scheme" == com.googleusercontent.apps.* && "$scheme" != *YOUR_GOOGLE_CLIENT_ID* ]]; then
+        echo "$scheme"
+        return 0
+      fi
+    done
+  done
+}
+
+if [[ -z "${GWS_BUNDLE_ID:-}" ]]; then
+  EXISTING_BUNDLE_ID="$(read_info_value "CFBundleIdentifier")"
+  if [[ -n "$EXISTING_BUNDLE_ID" ]]; then
+    export GWS_BUNDLE_ID="$EXISTING_BUNDLE_ID"
+  fi
+fi
+
+if [[ -z "${GWS_GOOGLE_CLIENT_ID:-}" ]]; then
+  EXISTING_CLIENT_ID="$(read_info_value "GIDClientID")"
+  if [[ "$EXISTING_CLIENT_ID" == *.apps.googleusercontent.com && "$EXISTING_CLIENT_ID" != *YOUR_GOOGLE_CLIENT_ID* ]]; then
+    export GWS_GOOGLE_CLIENT_ID="$EXISTING_CLIENT_ID"
+  fi
+fi
+
+if [[ -z "${GWS_GOOGLE_REVERSED_CLIENT_ID:-}" ]]; then
+  EXISTING_REVERSED_CLIENT_ID="$(read_google_url_scheme)"
+  if [[ -n "$EXISTING_REVERSED_CLIENT_ID" ]]; then
+    export GWS_GOOGLE_REVERSED_CLIENT_ID="$EXISTING_REVERSED_CLIENT_ID"
+  fi
+fi
 BUILD_LOG="$(mktemp -t gws-menu-build.XXXXXX)"
 trap 'rm -f "$BUILD_LOG"' EXIT
 "$ROOT_DIR/scripts/build-macos-app.sh" 2>&1 | tee "$BUILD_LOG"
 BUILT_APP="$(tail -n 1 "$BUILD_LOG")"
-DEST_APP="$INSTALL_DIR/$APP_NAME"
 
 if [[ ! -d "$BUILT_APP" ]]; then
   echo "Build did not produce an app bundle: $BUILT_APP" >&2
