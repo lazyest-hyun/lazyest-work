@@ -9,6 +9,11 @@ struct AppSprite {
     let yOffset: Int
 }
 
+struct LauncherIcon {
+    let resourceName: String
+    let pid: Int
+}
+
 struct StandaloneIcon {
     let resourceName: String
     let url: URL
@@ -42,7 +47,7 @@ guard args.contains(acceptedFlag) else {
     exit(64)
 }
 
-let spriteURL = URL(string: "https://ssl.gstatic.com/gb/images/sprites/p_2x_d075c781870b.png")!
+let launcherWidgetURL = URL(string: "https://ogs.google.com/widget/app/so?eom=1&awwd=1&em=2&origin=https%3A%2F%2Fwww.google.com&cn=app&pid=1&spid=1&hl=en")!
 let scriptURL = URL(fileURLWithPath: CommandLine.arguments[0], relativeTo: URL(fileURLWithPath: FileManager.default.currentDirectoryPath))
     .standardizedFileURL
 let rootDirectory = scriptURL.deletingLastPathComponent().deletingLastPathComponent()
@@ -51,28 +56,28 @@ let outputDirectory = rootDirectory
 let scale = 2
 let iconSize = 53 * scale
 
-let apps: [AppSprite] = [
-    AppSprite(resourceName: "account", yOffset: -2088),
-    AppSprite(resourceName: "search", yOffset: -812),
-    AppSprite(resourceName: "maps", yOffset: -2146),
-    AppSprite(resourceName: "youtube", yOffset: -1102),
-    AppSprite(resourceName: "news", yOffset: -232),
-    AppSprite(resourceName: "gmail", yOffset: -522),
-    AppSprite(resourceName: "meet", yOffset: -1856),
-    AppSprite(resourceName: "chat", yOffset: -2494),
-    AppSprite(resourceName: "contacts", yOffset: -464),
-    AppSprite(resourceName: "drive", yOffset: -2030),
-    AppSprite(resourceName: "calendar", yOffset: -1334),
-    AppSprite(resourceName: "translate", yOffset: -986),
-    AppSprite(resourceName: "photos", yOffset: -1682),
-    AppSprite(resourceName: "finance", yOffset: -580),
-    AppSprite(resourceName: "docs", yOffset: -2204),
-    AppSprite(resourceName: "sheets", yOffset: -406),
-    AppSprite(resourceName: "slides", yOffset: -2262),
-    AppSprite(resourceName: "keep", yOffset: -116),
-    AppSprite(resourceName: "ads", yOffset: -2610),
-    AppSprite(resourceName: "forms", yOffset: -290),
-    AppSprite(resourceName: "analytics", yOffset: -2668)
+let launcherIcons: [LauncherIcon] = [
+    LauncherIcon(resourceName: "account", pid: 192),
+    LauncherIcon(resourceName: "search", pid: 1),
+    LauncherIcon(resourceName: "maps", pid: 8),
+    LauncherIcon(resourceName: "youtube", pid: 36),
+    LauncherIcon(resourceName: "news", pid: 426),
+    LauncherIcon(resourceName: "gmail", pid: 23),
+    LauncherIcon(resourceName: "meet", pid: 411),
+    LauncherIcon(resourceName: "chat", pid: 385),
+    LauncherIcon(resourceName: "contacts", pid: 53),
+    LauncherIcon(resourceName: "drive", pid: 49),
+    LauncherIcon(resourceName: "calendar", pid: 24),
+    LauncherIcon(resourceName: "translate", pid: 51),
+    LauncherIcon(resourceName: "photos", pid: 31),
+    LauncherIcon(resourceName: "finance", pid: 27),
+    LauncherIcon(resourceName: "docs", pid: 25),
+    LauncherIcon(resourceName: "sheets", pid: 283),
+    LauncherIcon(resourceName: "slides", pid: 281),
+    LauncherIcon(resourceName: "keep", pid: 136),
+    LauncherIcon(resourceName: "ads", pid: 304),
+    LauncherIcon(resourceName: "forms", pid: 330),
+    LauncherIcon(resourceName: "analytics", pid: 44)
 ]
 
 let standaloneIcons: [StandaloneIcon] = [
@@ -130,6 +135,96 @@ func downloadData(from sourceURL: URL) throws -> Data {
     return try result.get()
 }
 
+func downloadString(from sourceURL: URL) throws -> String {
+    let data = try downloadData(from: sourceURL)
+    guard let string = String(data: data, encoding: .utf8) else {
+        throw NSError(
+            domain: "GWSMenuIconSync",
+            code: 7,
+            userInfo: [NSLocalizedDescriptionKey: "Downloaded response is not UTF-8 from \(sourceURL.absoluteString)"]
+        )
+    }
+    return string
+}
+
+func firstRegexMatch(in string: String, pattern: String, group: Int = 0) -> String? {
+    guard let regex = try? NSRegularExpression(pattern: pattern) else {
+        return nil
+    }
+    let range = NSRange(string.startIndex..<string.endIndex, in: string)
+    guard let match = regex.firstMatch(in: string, range: range),
+          let matchRange = Range(match.range(at: group), in: string) else {
+        return nil
+    }
+    return String(string[matchRange])
+}
+
+func allRegexMatches(in string: String, pattern: String) -> [[String]] {
+    guard let regex = try? NSRegularExpression(pattern: pattern) else {
+        return []
+    }
+    let range = NSRange(string.startIndex..<string.endIndex, in: string)
+    return regex.matches(in: string, range: range).map { match in
+        (0..<match.numberOfRanges).compactMap { index in
+            guard let matchRange = Range(match.range(at: index), in: string) else {
+                return nil
+            }
+            return String(string[matchRange])
+        }
+    }
+}
+
+func normalizedGoogleAssetURL(_ rawValue: String) -> URL? {
+    var value = rawValue
+        .replacingOccurrences(of: #"\/"#, with: "/")
+        .replacingOccurrences(of: #"\\u003d"#, with: "=")
+        .replacingOccurrences(of: #"\\u0026"#, with: "&")
+        .replacingOccurrences(of: #"\u003d"#, with: "=")
+        .replacingOccurrences(of: #"\u0026"#, with: "&")
+    if value.hasPrefix("//") {
+        value = "https:" + value
+    }
+    return URL(string: value)
+}
+
+func parseLauncherSpriteURL(from html: String) throws -> URL {
+    let patterns = [
+        #"https:\\/\\/ssl\.gstatic\.com\\/gb\\/images\\/sprites\\/p_2x_[^"\\]+\.png"#,
+        #"https://ssl\.gstatic\.com/gb/images/sprites/p_2x_[^"'<>\s]+\.png"#,
+        #"//ssl\.gstatic\.com/gb/images/sprites/p_2x_[^"'<>\s]+\.png"#
+    ]
+    for pattern in patterns {
+        if let rawValue = firstRegexMatch(in: html, pattern: pattern),
+           let url = normalizedGoogleAssetURL(rawValue) {
+            return url
+        }
+    }
+    throw NSError(
+        domain: "GWSMenuIconSync",
+        code: 8,
+        userInfo: [NSLocalizedDescriptionKey: "Could not find the current Google app launcher sprite URL"]
+    )
+}
+
+func parseLauncherIconOffsets(from html: String) throws -> [Int: Int] {
+    let pattern = #"\[(\d+),"(?:[^"\\]|\\.)*","0 (-?\d+)px""#
+    var offsets: [Int: Int] = [:]
+    for match in allRegexMatches(in: html, pattern: pattern) where match.count == 3 {
+        guard let pid = Int(match[1]), let yOffset = Int(match[2]) else {
+            continue
+        }
+        offsets[pid] = yOffset
+    }
+    if offsets.isEmpty {
+        throw NSError(
+            domain: "GWSMenuIconSync",
+            code: 9,
+            userInfo: [NSLocalizedDescriptionKey: "Could not find Google app launcher icon offsets"]
+        )
+    }
+    return offsets
+}
+
 func writePNG(_ image: CGImage, to url: URL) throws {
     guard let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil) else {
         throw NSError(domain: "GWSMenuIconSync", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not create PNG destination for \(url.path)"])
@@ -147,6 +242,20 @@ func writeDownloadedPNG(from sourceURL: URL, to destinationURL: URL) throws {
         throw NSError(domain: "GWSMenuIconSync", code: 5, userInfo: [NSLocalizedDescriptionKey: "Could not decode \(sourceURL.absoluteString)"])
     }
     try writePNG(image, to: destinationURL)
+}
+
+let launcherHTML = try downloadString(from: launcherWidgetURL)
+let spriteURL = try parseLauncherSpriteURL(from: launcherHTML)
+let offsetsByPID = try parseLauncherIconOffsets(from: launcherHTML)
+let apps = try launcherIcons.map { icon in
+    guard let yOffset = offsetsByPID[icon.pid] else {
+        throw NSError(
+            domain: "GWSMenuIconSync",
+            code: 10,
+            userInfo: [NSLocalizedDescriptionKey: "Could not find Google app launcher offset for \(icon.resourceName)"]
+        )
+    }
+    return AppSprite(resourceName: icon.resourceName, yOffset: yOffset)
 }
 
 let data = try downloadData(from: spriteURL)
@@ -169,7 +278,7 @@ for icon in standaloneIcons {
     try writeDownloadedPNG(from: icon.url, to: outputDirectory.appendingPathComponent("\(icon.resourceName).png"))
 }
 
-print("Synced \(apps.count) Google app launcher icons and \(standaloneIcons.count) standalone Google service icons into git-ignored local resources.")
+print("Synced \(apps.count) Google app launcher icons from \(spriteURL.lastPathComponent) and \(standaloneIcons.count) standalone Google service icons into git-ignored local resources.")
 
 if !args.contains(noInstallFlag) {
     let installScript = rootDirectory.appendingPathComponent("scripts/install-macos-app.sh")

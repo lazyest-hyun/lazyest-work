@@ -503,6 +503,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         authClient.signOut()
         model.events = []
         model.gmailUnreadCount = nil
+        model.calendarNotificationsEnabled = false
         model.lastError = nil
         model.lastErrorRecovery = nil
         model.connectionState = authClient.connectionState()
@@ -523,6 +524,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 try GoogleAppBundleSetup.reset()
                 model.events = []
                 model.gmailUnreadCount = nil
+                model.calendarNotificationsEnabled = false
                 model.setupChecklistDismissed = false
                 model.connectionState = .missingBundleConfig
                 cancelCalendarNotifications()
@@ -654,7 +656,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     private func cancelCalendarNotifications() {
-        UNUserNotificationCenter.current().removeAllPendingNotificationRequests()
+        let center = UNUserNotificationCenter.current()
+        center.removeAllPendingNotificationRequests()
+        center.removeAllDeliveredNotifications()
     }
 
     private func enableGmailUnreadBadge() async {
