@@ -22,6 +22,7 @@ credentials*.json
 client_secret*.json
 
 # Runtime and editor noise
+.omo/
 *.log
 *.tmp
 *.swp

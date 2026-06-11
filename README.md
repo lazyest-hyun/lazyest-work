@@ -9,6 +9,7 @@ Native macOS menu bar app for Google Workspace shortcuts, read-only Google Calen
 - Opens Gmail, Calendar, Meet, Chat, Drive, Docs, Sheets, Slides, and custom Google services from the menu bar.
 - Shows your upcoming Google Calendar events and the current or next meeting in the menu bar.
 - Sends optional macOS desktop alerts before meetings.
+- Can run your Do Not Disturb Focus during accepted meetings.
 - Shows an optional Gmail Inbox unread badge, capped as `99+`.
 - Stores Google sign-in credentials in Keychain.
 
@@ -77,6 +78,7 @@ Do not use **Web application** or **Desktop app** credentials. If Google shows a
 After sign-in, GWS Menu shows a small **Finish setup** card for optional features:
 
 - **Meeting alerts**: asks for macOS notification permission only when you enable it.
+- **Meeting Focus**: runs Do Not Disturb during accepted meetings if you create two macOS Shortcuts.
 - **Gmail badge**: asks for Gmail unread-count permission only when you enable it.
 - **Open at login**: adds GWS Menu to macOS Login Items.
 
@@ -84,13 +86,24 @@ After sign-in, GWS Menu shows a small **Finish setup** card for optional feature
 
 Open Settings from the gear button in GWS Menu. Changes save automatically.
 
-- **Calendar**: choose desktop alert timing.
+- **Calendar**: choose desktop alert timing and optional Meeting Focus.
 - **Mail**: enable or disable the Gmail unread badge.
 - **General**: enable Open at login or open the GitHub repository.
 - **Account**: sign out of Google.
 - **Google setup**: reset the saved Client ID and URL scheme if you need to start over.
 
 To customize Workspace shortcuts, click the sliders button next to the **Workspace** label on the main menu. The editor uses the same grid layout as the menu.
+
+### Meeting Focus
+
+GWS Menu uses macOS Shortcuts instead of private Focus APIs.
+
+1. Open **Settings -> Calendar -> Focus shortcuts**.
+2. Create a shortcut named `GWS Menu Focus On` with **Set Focus -> Do Not Disturb -> On**.
+3. Create a shortcut named `GWS Menu Focus Off` with **Set Focus -> Do Not Disturb -> Off**.
+4. Turn on **Settings -> Calendar -> Meeting Focus**.
+
+Only current accepted meetings with a meeting link or guests trigger Focus. Tentative, unanswered, and declined meetings only show their status color in Upcoming.
 
 ## Updating
 
@@ -109,6 +122,7 @@ The installer closes any running `GWSMenu` process, replaces `~/Applications/GWS
 - The Gmail badge uses `https://www.googleapis.com/auth/gmail.labels` only when enabled.
 - GWS Menu does not read Gmail sender, subject, body, or attachments.
 - GWS Menu does not send desktop mail alerts.
+- Meeting Focus runs your local Shortcuts; your macOS Focus settings decide which apps or people are allowed through.
 - Google auth is handled by Google Sign-In and Keychain.
 - Google product icons are downloaded locally and ignored by Git.
 
@@ -117,6 +131,7 @@ The installer closes any running `GWSMenu` process, replaces `~/Applications/GWS
 - **`client_secret` error**: delete that OAuth client and create an `iOS` OAuth client instead.
 - **Sign-in opens and immediately closes**: open **Setup**, save the current Client ID once, then sign in again.
 - **Meeting alerts do not appear**: allow GWS Menu in **System Settings -> Notifications**, then enable Meeting alerts again.
+- **Meeting Focus does not change Do Not Disturb**: create both Shortcuts with the exact names `GWS Menu Focus On` and `GWS Menu Focus Off`.
 - **Old behavior after updating**: rerun the installer command; it restarts the menu app after replacing it.
 - **Need icons only**:
 

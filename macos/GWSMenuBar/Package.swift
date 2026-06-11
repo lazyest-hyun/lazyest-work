@@ -8,6 +8,7 @@ let package = Package(
         .macOS(.v14)
     ],
     products: [
+        .library(name: "GWSMenuCore", targets: ["GWSMenuCore"]),
         .executable(name: "GWSMenu", targets: ["GWSMenuBar"])
     ],
     dependencies: [
@@ -15,9 +16,14 @@ let package = Package(
         .package(url: "https://github.com/google/GTMAppAuth.git", from: "5.0.0")
     ],
     targets: [
+        .target(
+            name: "GWSMenuCore",
+            path: "Sources/GWSMenuCore"
+        ),
         .executableTarget(
             name: "GWSMenuBar",
             dependencies: [
+                "GWSMenuCore",
                 .product(name: "GoogleSignIn", package: "GoogleSignIn-iOS"),
                 .product(name: "GTMAppAuth", package: "GTMAppAuth")
             ],

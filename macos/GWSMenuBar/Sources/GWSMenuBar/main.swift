@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import Foundation
 import GTMAppAuth
+import GWSMenuCore
 import ObjectiveC
 import ServiceManagement
 import SwiftUI
@@ -28,6 +29,11 @@ final class AppModel: ObservableObject {
             AlertSettings.saveCalendarNotificationsEnabled(calendarNotificationsEnabled)
         }
     }
+    @Published var meetingFocusEnabled: Bool {
+        didSet {
+            FocusSettings.saveMeetingFocusEnabled(meetingFocusEnabled)
+        }
+    }
     @Published var mailBadgeEnabled: Bool {
         didSet {
             MailBadgeSettings.saveEnabled(mailBadgeEnabled)
@@ -43,6 +49,7 @@ final class AppModel: ObservableObject {
     init() {
         alertLeadMinutes = AlertSettings.loadLeadMinutes()
         calendarNotificationsEnabled = AlertSettings.loadCalendarNotificationsEnabled()
+        meetingFocusEnabled = FocusSettings.loadMeetingFocusEnabled()
         mailBadgeEnabled = MailBadgeSettings.loadEnabled()
         launchAtLoginEnabled = LaunchAtLoginSettings.isEnabled()
         setupChecklistDismissed = SetupChecklistSettings.loadDismissed()
@@ -177,6 +184,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private lazy var authClient = GoogleSignInAuthClient(authWindow: authWindow)
     private lazy var calendarService = GoogleCalendarService(authClient: authClient)
     private lazy var gmailService = GoogleGmailService(authClient: authClient)
+    private let meetingFocusBridge = MeetingFocusBridge()
     private lazy var popover: NSPopover = makePopover()
     private var cancellables = Set<AnyCancellable>()
     private var timer: Timer?
@@ -206,6 +214,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         for url in urls {
             _ = authClient.handle(url: url)
         }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        turnOffManagedMeetingFocus()
     }
 
     private func configureStatusItem() {
@@ -241,6 +253,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 onUpdateWorkspaceApps: { [weak self] apps in self?.updateWorkspaceApps(apps) },
                 onUpdateAlertLeadMinutes: { [weak self] minutes in self?.updateAlertLeadMinutes(minutes) },
                 onUpdateCalendarNotifications: { [weak self] isEnabled in self?.updateCalendarNotificationsEnabled(isEnabled) },
+                onUpdateMeetingFocus: { [weak self] isEnabled in self?.updateMeetingFocusEnabled(isEnabled) },
                 onUpdateMailBadge: { [weak self] isEnabled in self?.updateMailBadgeEnabled(isEnabled) },
                 onUpdateLaunchAtLogin: { [weak self] isEnabled in self?.updateLaunchAtLoginEnabled(isEnabled) },
                 onOpenURL: { url in NSWorkspace.shared.open(url) }
@@ -305,6 +318,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             }
             refreshUI()
             cancelCalendarNotifications()
+            syncMeetingFocus()
             return
         }
 
@@ -355,6 +369,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         if eventsChanged {
             await syncCalendarNotifications()
         }
+        syncMeetingFocus()
     }
 
     private func refreshUI() {
@@ -508,6 +523,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         model.lastErrorRecovery = nil
         model.connectionState = authClient.connectionState()
         cancelCalendarNotifications()
+        turnOffManagedMeetingFocus()
         refreshUI()
     }
 
@@ -528,6 +544,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 model.setupChecklistDismissed = false
                 model.connectionState = .missingBundleConfig
                 cancelCalendarNotifications()
+                turnOffManagedMeetingFocus()
                 refreshUI()
                 relaunchApp()
             } catch {
@@ -567,6 +584,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         Task {
             await syncCalendarNotifications()
         }
+    }
+
+    private func updateMeetingFocusEnabled(_ isEnabled: Bool) {
+        guard model.meetingFocusEnabled != isEnabled else { return }
+        model.meetingFocusEnabled = isEnabled
+        model.lastError = nil
+        model.lastErrorRecovery = nil
+        refreshUI()
+        syncMeetingFocus()
     }
 
     private func updateMailBadgeEnabled(_ isEnabled: Bool) {
@@ -659,6 +685,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let center = UNUserNotificationCenter.current()
         center.removeAllPendingNotificationRequests()
         center.removeAllDeliveredNotifications()
+    }
+
+    private func syncMeetingFocus() {
+        let desiredState = MeetingFocusPolicy.desiredState(
+            events: model.events,
+            now: model.now,
+            isEnabled: model.meetingFocusEnabled && model.connectionState.isConnected
+        )
+        do {
+            try meetingFocusBridge.apply(desiredState)
+        } catch {
+            model.lastError = userFacingError(error)
+            model.lastErrorRecovery = nil
+            refreshUI()
+        }
+    }
+
+    private func turnOffManagedMeetingFocus() {
+        do {
+            try meetingFocusBridge.apply(.inactive)
+        } catch {
+            model.lastError = userFacingError(error)
+            model.lastErrorRecovery = nil
+        }
     }
 
     private func enableGmailUnreadBadge() async {
@@ -869,6 +919,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         if lowercased.contains("notification") {
             return "macOS notification permission is off. Open System Settings, allow GWS Menu notifications, then enable Meeting alerts again."
         }
+        if lowercased.contains("focus shortcut") || lowercased.contains("shortcuts") {
+            return "Meeting Focus needs two Shortcuts named \(MeetingFocusBridge.onShortcutName) and \(MeetingFocusBridge.offShortcutName). Create them in Shortcuts with Set Focus actions for Do Not Disturb on and off."
+        }
         if lowercased.contains("login item") || lowercased.contains("launch") {
             return "Open at login could not be changed. Check System Settings > General > Login Items."
         }
@@ -922,6 +975,8 @@ struct GWSMenuPopover: View {
     @ObservedObject var model: AppModel
     @State private var screen = PopoverScreen.home
     @State private var editorID = UUID()
+    @State private var isWorkspaceExpanded = false
+    @State private var isUpcomingExpanded = false
     let onSignIn: () -> Void
     let onRefresh: () -> Void
     let onSignOut: () -> Void
@@ -934,6 +989,7 @@ struct GWSMenuPopover: View {
     let onUpdateWorkspaceApps: ([WorkspaceApp]) -> Void
     let onUpdateAlertLeadMinutes: (Int) -> Void
     let onUpdateCalendarNotifications: (Bool) -> Void
+    let onUpdateMeetingFocus: (Bool) -> Void
     let onUpdateMailBadge: (Bool) -> Void
     let onUpdateLaunchAtLogin: (Bool) -> Void
     let onOpenURL: (URL) -> Void
@@ -948,15 +1004,18 @@ struct GWSMenuPopover: View {
                     connectionState: model.connectionState,
                     initialAlertLeadMinutes: model.alertLeadMinutes,
                     initialCalendarNotificationsEnabled: model.calendarNotificationsEnabled,
+                    initialMeetingFocusEnabled: model.meetingFocusEnabled,
                     initialMailBadgeEnabled: model.mailBadgeEnabled,
                     initialLaunchAtLoginEnabled: model.launchAtLoginEnabled,
                     onDone: { screen = .home },
                     onSignOut: onSignOut,
                     onResetGoogleSetup: onResetGoogleSetup,
                     onOpenNotificationSettings: openNotificationSettings,
+                    onOpenShortcuts: openShortcuts,
                     onOpenGitHub: openGitHub,
                     onUpdateAlertLeadMinutes: onUpdateAlertLeadMinutes,
                     onUpdateCalendarNotifications: onUpdateCalendarNotifications,
+                    onUpdateMeetingFocus: onUpdateMeetingFocus,
                     onUpdateMailBadge: onUpdateMailBadge,
                     onUpdateLaunchAtLogin: onUpdateLaunchAtLogin
                 )
@@ -995,6 +1054,8 @@ struct GWSMenuPopover: View {
             WorkspaceGrid(
                 apps: model.workspaceApps.filter(\.isEnabled),
                 gmailUnreadCount: model.gmailUnreadCount,
+                isExpanded: isWorkspaceExpanded,
+                onToggleExpanded: { isWorkspaceExpanded.toggle() },
                 onManageApps: openWorkspaceSettings,
                 onOpenURL: onOpenURL
             )
@@ -1039,7 +1100,13 @@ struct GWSMenuPopover: View {
                         )
                     }
 
-                    UpcomingEventsView(events: Array(model.events.prefix(8)), now: model.now, onOpenURL: onOpenURL)
+                    UpcomingEventsView(
+                        events: model.events,
+                        now: model.now,
+                        isExpanded: isUpcomingExpanded,
+                        onToggleExpanded: { isUpcomingExpanded.toggle() },
+                        onOpenURL: onOpenURL
+                    )
                 }
                 .padding(16)
             }
@@ -1080,6 +1147,11 @@ struct GWSMenuPopover: View {
 
     private func openNotificationSettings() {
         guard let url = notificationSettingsURL() else { return }
+        onOpenURL(url)
+    }
+
+    private func openShortcuts() {
+        guard let url = URL(string: "shortcuts://") else { return }
         onOpenURL(url)
     }
 
@@ -1558,15 +1630,40 @@ struct SettingsActionRow: View {
 struct UpcomingEventsView: View {
     let events: [MeetingEvent]
     let now: Date
+    let isExpanded: Bool
+    let onToggleExpanded: () -> Void
     let onOpenURL: (URL) -> Void
+
+    private var visibleEvents: [MeetingEvent] {
+        MenuSectionVisibility.visibleUpcomingEvents(events, now: now, isExpanded: isExpanded)
+    }
 
     var body: some View {
         if !events.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
-                SectionTitle("Upcoming")
-                VStack(spacing: 8) {
-                    ForEach(events, id: \.id) { event in
-                        EventRow(event: event, now: now, onOpenURL: onOpenURL)
+                HStack(spacing: 8) {
+                    SectionTitle("Upcoming")
+                    Spacer()
+                    IconButton(
+                        symbolName: isExpanded ? "chevron.up" : "chevron.down",
+                        title: isExpanded ? "Show today only" : "Show this week",
+                        action: onToggleExpanded
+                    )
+                    .frame(width: 24, height: 24)
+                }
+
+                if visibleEvents.isEmpty {
+                    Text(isExpanded ? "No meetings this week" : "No meetings today")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
+                        .menuSurface(.inset)
+                } else {
+                    VStack(spacing: 8) {
+                        ForEach(visibleEvents, id: \.id) { event in
+                            EventRow(event: event, now: now, onOpenURL: onOpenURL)
+                        }
                     }
                 }
             }
@@ -1596,6 +1693,11 @@ struct EventRow: View {
 
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 5) {
+                    Circle()
+                        .fill(event.selfResponseStatus.indicatorColor)
+                        .frame(width: 7, height: 7)
+                        .help(event.selfResponseStatus.helpText)
+
                     Text(event.title)
                         .font(.system(size: 13, weight: .medium))
                         .lineLimit(1)
@@ -1705,20 +1807,39 @@ struct WorkspaceGrid: View {
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 8), count: 4)
     let apps: [WorkspaceApp]
     let gmailUnreadCount: Int?
+    let isExpanded: Bool
+    let onToggleExpanded: () -> Void
     let onManageApps: () -> Void
     let onOpenURL: (URL) -> Void
+
+    private var visibleApps: [WorkspaceApp] {
+        let visibleIDs = Set(MenuSectionVisibility.visibleWorkspaceIDs(
+            apps.map(\.id),
+            isExpanded: isExpanded,
+            columns: MenuSectionVisibility.defaultWorkspaceColumns
+        ))
+        return apps.filter { visibleIDs.contains($0.id) }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 SectionTitle("Workspace")
                 Spacer()
+                if apps.count > MenuSectionVisibility.defaultWorkspaceColumns {
+                    IconButton(
+                        symbolName: isExpanded ? "chevron.up" : "chevron.down",
+                        title: isExpanded ? "Collapse workspace apps" : "Show all workspace apps",
+                        action: onToggleExpanded
+                    )
+                    .frame(width: 24, height: 24)
+                }
                 IconButton(symbolName: "slider.horizontal.3", title: "Manage workspace apps", action: onManageApps)
                     .frame(width: 24, height: 24)
             }
 
             LazyVGrid(columns: columns, spacing: 8) {
-                ForEach(apps) { app in
+                ForEach(visibleApps) { app in
                     Button {
                         if let url = app.url {
                             onOpenURL(url)
@@ -2209,6 +2330,7 @@ struct AppSettingsView: View {
     let connectionState: ConnectionState
     @State private var draftAlertLeadMinutes: Int
     @State private var draftCalendarNotificationsEnabled: Bool
+    @State private var draftMeetingFocusEnabled: Bool
     @State private var draftMailBadgeEnabled: Bool
     @State private var draftLaunchAtLoginEnabled: Bool
     @State private var showsResetGoogleSetupConfirmation = false
@@ -2216,9 +2338,11 @@ struct AppSettingsView: View {
     let onSignOut: () -> Void
     let onResetGoogleSetup: () -> Void
     let onOpenNotificationSettings: () -> Void
+    let onOpenShortcuts: () -> Void
     let onOpenGitHub: () -> Void
     let onUpdateAlertLeadMinutes: (Int) -> Void
     let onUpdateCalendarNotifications: (Bool) -> Void
+    let onUpdateMeetingFocus: (Bool) -> Void
     let onUpdateMailBadge: (Bool) -> Void
     let onUpdateLaunchAtLogin: (Bool) -> Void
 
@@ -2226,20 +2350,24 @@ struct AppSettingsView: View {
         connectionState: ConnectionState,
         initialAlertLeadMinutes: Int,
         initialCalendarNotificationsEnabled: Bool,
+        initialMeetingFocusEnabled: Bool,
         initialMailBadgeEnabled: Bool,
         initialLaunchAtLoginEnabled: Bool,
         onDone: @escaping () -> Void,
         onSignOut: @escaping () -> Void,
         onResetGoogleSetup: @escaping () -> Void,
         onOpenNotificationSettings: @escaping () -> Void,
+        onOpenShortcuts: @escaping () -> Void,
         onOpenGitHub: @escaping () -> Void,
         onUpdateAlertLeadMinutes: @escaping (Int) -> Void,
         onUpdateCalendarNotifications: @escaping (Bool) -> Void,
+        onUpdateMeetingFocus: @escaping (Bool) -> Void,
         onUpdateMailBadge: @escaping (Bool) -> Void,
         onUpdateLaunchAtLogin: @escaping (Bool) -> Void
     ) {
         _draftAlertLeadMinutes = State(initialValue: initialAlertLeadMinutes)
         _draftCalendarNotificationsEnabled = State(initialValue: initialCalendarNotificationsEnabled)
+        _draftMeetingFocusEnabled = State(initialValue: initialMeetingFocusEnabled)
         _draftMailBadgeEnabled = State(initialValue: initialMailBadgeEnabled)
         _draftLaunchAtLoginEnabled = State(initialValue: initialLaunchAtLoginEnabled)
         self.connectionState = connectionState
@@ -2247,9 +2375,11 @@ struct AppSettingsView: View {
         self.onSignOut = onSignOut
         self.onResetGoogleSetup = onResetGoogleSetup
         self.onOpenNotificationSettings = onOpenNotificationSettings
+        self.onOpenShortcuts = onOpenShortcuts
         self.onOpenGitHub = onOpenGitHub
         self.onUpdateAlertLeadMinutes = onUpdateAlertLeadMinutes
         self.onUpdateCalendarNotifications = onUpdateCalendarNotifications
+        self.onUpdateMeetingFocus = onUpdateMeetingFocus
         self.onUpdateMailBadge = onUpdateMailBadge
         self.onUpdateLaunchAtLogin = onUpdateLaunchAtLogin
     }
@@ -2296,6 +2426,21 @@ struct AppSettingsView: View {
                         isOn: calendarNotificationsBinding
                     )
                     AlertLeadSettingRow(selectedMinutes: alertLeadMinutesBinding)
+                    NotificationToggleRow(
+                        title: "Meeting Focus",
+                        subtitle: "Run Do Not Disturb during accepted meetings with your macOS Focus rules.",
+                        systemImage: "moon.zzz",
+                        isOn: meetingFocusBinding
+                    )
+                    SettingsActionRow(
+                        title: "Focus shortcuts",
+                        subtitle: "Create GWS Menu Focus On and GWS Menu Focus Off in Shortcuts.",
+                        systemImage: "sparkles",
+                        buttonTitle: "Open",
+                        buttonRole: nil,
+                        isDisabled: false,
+                        action: onOpenShortcuts
+                    )
                     SettingsActionRow(
                         title: "Notification settings",
                         subtitle: "Open this app's macOS notification controls.",
@@ -2368,6 +2513,16 @@ struct AppSettingsView: View {
             set: { newValue in
                 draftCalendarNotificationsEnabled = newValue
                 onUpdateCalendarNotifications(newValue)
+            }
+        )
+    }
+
+    private var meetingFocusBinding: Binding<Bool> {
+        Binding(
+            get: { draftMeetingFocusEnabled },
+            set: { newValue in
+                draftMeetingFocusEnabled = newValue
+                onUpdateMeetingFocus(newValue)
             }
         )
     }
@@ -3204,6 +3359,71 @@ enum AlertSettings {
     }
 }
 
+enum FocusSettings {
+    private static let meetingFocusEnabledKey = "meetingFocusEnabled"
+
+    static func loadMeetingFocusEnabled() -> Bool {
+        UserDefaults.standard.bool(forKey: meetingFocusEnabledKey)
+    }
+
+    static func saveMeetingFocusEnabled(_ isEnabled: Bool) {
+        UserDefaults.standard.set(isEnabled, forKey: meetingFocusEnabledKey)
+    }
+}
+
+final class MeetingFocusBridge {
+    static let onShortcutName = "GWS Menu Focus On"
+    static let offShortcutName = "GWS Menu Focus Off"
+
+    private let managedActiveKey = "meetingFocusManagedActive"
+    private let managedEventIDKey = "meetingFocusManagedEventID"
+
+    func apply(_ state: MeetingFocusState) throws {
+        let defaults = UserDefaults.standard
+        switch state {
+        case .active(_, let eventID):
+            if defaults.bool(forKey: managedActiveKey) {
+                if defaults.string(forKey: managedEventIDKey) != eventID {
+                    defaults.set(eventID, forKey: managedEventIDKey)
+                }
+                return
+            }
+            try runShortcut(Self.onShortcutName)
+            defaults.set(true, forKey: managedActiveKey)
+            defaults.set(eventID, forKey: managedEventIDKey)
+        case .inactive:
+            guard defaults.bool(forKey: managedActiveKey) else {
+                return
+            }
+            try runShortcut(Self.offShortcutName)
+            defaults.set(false, forKey: managedActiveKey)
+            defaults.removeObject(forKey: managedEventIDKey)
+        }
+    }
+
+    private func runShortcut(_ name: String) throws {
+        let process = Process()
+        let errorPipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/shortcuts")
+        process.arguments = ["run", name]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = errorPipe
+        do {
+            try process.run()
+        } catch {
+            throw AppError.focusShortcutFailed(name: name, detail: error.localizedDescription)
+        }
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+            let detail = String(data: errorData, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .nilIfBlank ?? "shortcuts exited with status \(process.terminationStatus)"
+            throw AppError.focusShortcutFailed(name: name, detail: detail)
+        }
+    }
+}
+
 enum MailBadgeSettings {
     private static let enabledKey = "mailUnreadBadgeEnabled"
     private static let legacyEnabledKey = "mailNotificationsEnabled"
@@ -3797,9 +4017,6 @@ extension GoogleEvent {
         if transparency == "transparent" {
             return false
         }
-        if attendees?.first(where: { $0.selfAttendee == true })?.responseStatus == "declined" {
-            return false
-        }
         return true
     }
 }
@@ -3824,6 +4041,7 @@ struct MeetingEvent: Equatable {
     let organizerName: String?
     let guestCount: Int
     let participants: [MeetingParticipant]
+    let selfResponseStatus: CalendarSelfResponseStatus
 
     init?(event: GoogleEvent, calendarName: String?) {
         let fractionalParser = ISO8601DateFormatter()
@@ -3862,6 +4080,7 @@ struct MeetingEvent: Equatable {
         self.organizerName = event.organizer?.label ?? event.creator?.label
         self.guestCount = MeetingEvent.guestCount(from: event)
         self.participants = MeetingEvent.participants(from: event)
+        self.selfResponseStatus = MeetingEvent.selfResponseStatus(from: event)
     }
 
     var meetingURL: URL? {
@@ -3872,6 +4091,10 @@ struct MeetingEvent: Equatable {
             return htmlLink
         }
         return MeetingLinkDetector.firstMeetingURL(in: [location, notes].joined(separator: "\n"))
+    }
+
+    var hasMeetingSignal: Bool {
+        meetingURL != nil || guestCount > 0
     }
 
     var timeText: String {
@@ -4033,6 +4256,16 @@ struct MeetingEvent: Equatable {
         return participants
     }
 
+    private static func selfResponseStatus(from event: GoogleEvent) -> CalendarSelfResponseStatus {
+        if event.organizer?.selfPerson == true || event.creator?.selfPerson == true {
+            return .accepted
+        }
+        if let responseStatus = event.attendees?.first(where: { $0.selfAttendee == true })?.responseStatus {
+            return CalendarSelfResponseStatus(rawGoogleValue: responseStatus)
+        }
+        return .accepted
+    }
+
     var menuBarTitle: String {
         title.truncatedForMenuBar(maxLength: 28)
     }
@@ -4044,6 +4277,38 @@ struct MeetingEvent: Equatable {
     func notificationIdentifier(leadMinutes: Int) -> String {
         let rawID = id.replacingOccurrences(of: #"[^A-Za-z0-9_-]"#, with: "-", options: .regularExpression)
         return "\(NotificationNamespaces.calendar)\(rawID)-\(Int(start.timeIntervalSince1970))-\(leadMinutes)"
+    }
+}
+
+extension MeetingEvent: MenuEventRepresentable, FocusEventRepresentable {}
+
+extension CalendarSelfResponseStatus {
+    var indicatorColor: Color {
+        switch indicatorSemanticColor {
+        case .green:
+            return .green
+        case .orange:
+            return .orange
+        case .gray:
+            return .secondary
+        case .red:
+            return .red
+        }
+    }
+
+    var helpText: String {
+        switch self {
+        case .accepted:
+            return "Accepted"
+        case .tentative:
+            return "Tentative"
+        case .needsAction:
+            return "No response"
+        case .declined:
+            return "Declined"
+        case .unknown:
+            return "Unknown response"
+        }
     }
 }
 
@@ -4372,6 +4637,7 @@ enum AppError: LocalizedError {
     case calendarScopeNotGranted
     case gmailScopeNotGranted
     case notificationPermissionDenied
+    case focusShortcutFailed(name: String, detail: String)
     case api(String)
 
     var errorDescription: String? {
@@ -4388,6 +4654,8 @@ enum AppError: LocalizedError {
             return "Gmail unread-count permission was not granted"
         case .notificationPermissionDenied:
             return "macOS notification permission was not granted"
+        case .focusShortcutFailed(let name, let detail):
+            return "Focus shortcut '\(name)' failed: \(detail)"
         case .api(let message):
             return message
         }
