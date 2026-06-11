@@ -14,7 +14,7 @@ GOOGLE_REVERSED_CLIENT_ID="${GWS_GOOGLE_REVERSED_CLIENT_ID:-com.googleuserconten
 CODE_SIGN_IDENTITY="${GWS_CODESIGN_IDENTITY:-}"
 TEAM_ID="${GWS_TEAM_ID:-}"
 
-swift build --package-path "$PACKAGE_DIR" -c release
+swift build --package-path "$PACKAGE_DIR" -c release -Xswiftc -gnone
 
 rm -rf "$APP_DIR"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"

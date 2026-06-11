@@ -588,6 +588,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     private func updateMeetingFocusEnabled(_ isEnabled: Bool) {
         guard model.meetingFocusEnabled != isEnabled else { return }
+        if isEnabled {
+            do {
+                guard try meetingFocusBridge.prepareHelperShortcut() else {
+                    model.meetingFocusEnabled = true
+                    model.lastError = "Shortcuts opened. Click Add Shortcut once; Meeting Focus will use it automatically."
+                    model.lastErrorRecovery = nil
+                    refreshUI()
+                    return
+                }
+            } catch {
+                model.meetingFocusEnabled = false
+                model.lastError = userFacingError(error)
+                model.lastErrorRecovery = nil
+                refreshUI()
+                return
+            }
+        }
         model.meetingFocusEnabled = isEnabled
         model.lastError = nil
         model.lastErrorRecovery = nil
@@ -920,7 +937,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             return "macOS notification permission is off. Open System Settings, allow GWS Menu notifications, then enable Meeting alerts again."
         }
         if lowercased.contains("focus shortcut") || lowercased.contains("shortcuts") {
-            return "Meeting Focus needs two Shortcuts named \(MeetingFocusBridge.onShortcutName) and \(MeetingFocusBridge.offShortcutName). Create them in Shortcuts with Set Focus actions for Do Not Disturb on and off."
+            return "Meeting Focus needs its helper shortcut. Open Settings > Calendar > Focus helper, click Install, then add the shortcut once."
         }
         if lowercased.contains("login item") || lowercased.contains("launch") {
             return "Open at login could not be changed. Check System Settings > General > Login Items."
@@ -1151,8 +1168,17 @@ struct GWSMenuPopover: View {
     }
 
     private func openShortcuts() {
-        guard let url = URL(string: "shortcuts://") else { return }
-        onOpenURL(url)
+        let url = AppResourceLocator.url(
+            named: "DND Raycast",
+            extension: "shortcut",
+            subdirectory: "FocusShortcuts"
+        ) ?? URL(string: "shortcuts://")
+        guard let url else { return }
+        if url.isFileURL {
+            try? SystemOpener.openFile(url)
+        } else {
+            onOpenURL(url)
+        }
     }
 
     private func openGitHub() {
@@ -2428,15 +2454,15 @@ struct AppSettingsView: View {
                     AlertLeadSettingRow(selectedMinutes: alertLeadMinutesBinding)
                     NotificationToggleRow(
                         title: "Meeting Focus",
-                        subtitle: "Run Do Not Disturb during accepted meetings with your macOS Focus rules.",
+                        subtitle: "Run Do Not Disturb during accepted meetings after one helper install.",
                         systemImage: "moon.zzz",
                         isOn: meetingFocusBinding
                     )
                     SettingsActionRow(
-                        title: "Focus shortcuts",
-                        subtitle: "Create GWS Menu Focus On and GWS Menu Focus Off in Shortcuts.",
+                        title: "Focus helper",
+                        subtitle: "Install the helper shortcut if Meeting Focus asks for it.",
                         systemImage: "sparkles",
-                        buttonTitle: "Open",
+                        buttonTitle: "Install",
                         buttonRole: nil,
                         isDisabled: false,
                         action: onOpenShortcuts
@@ -3371,12 +3397,76 @@ enum FocusSettings {
     }
 }
 
+enum AppResourceLocator {
+    private static let resourceBundleName = "GWSMenuBar_GWSMenuBar.bundle"
+
+    static func url(named name: String, extension fileExtension: String, subdirectory: String? = nil) -> URL? {
+        for bundleURL in resourceBundleCandidates() {
+            if let bundle = Bundle(url: bundleURL),
+               let url = bundle.url(forResource: name, withExtension: fileExtension, subdirectory: subdirectory) {
+                return url
+            }
+            if subdirectory != nil,
+               let bundle = Bundle(url: bundleURL),
+               let url = bundle.url(forResource: name, withExtension: fileExtension) {
+                return url
+            }
+
+            var directURL = bundleURL
+            if let subdirectory {
+                directURL.appendPathComponent(subdirectory, isDirectory: true)
+            }
+            directURL.appendPathComponent("\(name).\(fileExtension)")
+            if FileManager.default.fileExists(atPath: directURL.path) {
+                return directURL
+            }
+            if subdirectory != nil {
+                let rootURL = bundleURL.appendingPathComponent("\(name).\(fileExtension)")
+                if FileManager.default.fileExists(atPath: rootURL.path) {
+                    return rootURL
+                }
+            }
+        }
+        return nil
+    }
+
+    private static func resourceBundleCandidates() -> [URL] {
+        guard let resourceURL = Bundle.main.resourceURL else {
+            return []
+        }
+        return [
+            resourceURL.appendingPathComponent(resourceBundleName, isDirectory: true),
+            resourceURL
+        ]
+    }
+}
+
+enum SystemOpener {
+    static func openFile(_ url: URL) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = [url.path]
+        try process.run()
+        process.waitUntilExit()
+        if process.terminationStatus != 0 {
+            throw AppError.focusShortcutFailed(name: url.lastPathComponent, detail: "open exited with status \(process.terminationStatus)")
+        }
+    }
+}
+
 final class MeetingFocusBridge {
-    static let onShortcutName = "GWS Menu Focus On"
-    static let offShortcutName = "GWS Menu Focus Off"
+    private static let helperShortcutName = "DND Raycast"
 
     private let managedActiveKey = "meetingFocusManagedActive"
     private let managedEventIDKey = "meetingFocusManagedEventID"
+
+    func prepareHelperShortcut() throws -> Bool {
+        if try isHelperShortcutInstalled() {
+            return true
+        }
+        try openHelperInstaller()
+        return false
+    }
 
     func apply(_ state: MeetingFocusState) throws {
         let defaults = UserDefaults.standard
@@ -3388,30 +3478,70 @@ final class MeetingFocusBridge {
                 }
                 return
             }
-            try runShortcut(Self.onShortcutName)
+            guard try isHelperShortcutInstalled() else {
+                throw AppError.focusShortcutFailed(name: Self.helperShortcutName, detail: "helper shortcut is not installed")
+            }
+            try runHelperShortcut(command: "on")
             defaults.set(true, forKey: managedActiveKey)
             defaults.set(eventID, forKey: managedEventIDKey)
         case .inactive:
             guard defaults.bool(forKey: managedActiveKey) else {
                 return
             }
-            try runShortcut(Self.offShortcutName)
+            guard try isHelperShortcutInstalled() else {
+                defaults.set(false, forKey: managedActiveKey)
+                defaults.removeObject(forKey: managedEventIDKey)
+                return
+            }
+            try runHelperShortcut(command: "off")
             defaults.set(false, forKey: managedActiveKey)
             defaults.removeObject(forKey: managedEventIDKey)
         }
     }
 
-    private func runShortcut(_ name: String) throws {
+    private func isHelperShortcutInstalled() throws -> Bool {
+        let output = try runShortcuts(arguments: ["list"], standardInput: nil)
+        return output
+            .split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .contains(Self.helperShortcutName)
+    }
+
+    private func openHelperInstaller() throws {
+        guard let url = AppResourceLocator.url(
+            named: Self.helperShortcutName,
+            extension: "shortcut",
+            subdirectory: "FocusShortcuts"
+        ) else {
+            throw AppError.focusShortcutFailed(name: Self.helperShortcutName, detail: "bundled helper shortcut is missing")
+        }
+        try SystemOpener.openFile(url)
+    }
+
+    private func runHelperShortcut(command: String) throws {
+        _ = try runShortcuts(arguments: ["run", Self.helperShortcutName], standardInput: command)
+    }
+
+    private func runShortcuts(arguments: [String], standardInput: String?) throws -> String {
         let process = Process()
+        let outputPipe = Pipe()
         let errorPipe = Pipe()
+        let inputPipe = Pipe()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/shortcuts")
-        process.arguments = ["run", name]
-        process.standardOutput = FileHandle.nullDevice
+        process.arguments = arguments
+        process.standardOutput = outputPipe
         process.standardError = errorPipe
+        if standardInput != nil {
+            process.standardInput = inputPipe
+        }
         do {
             try process.run()
         } catch {
-            throw AppError.focusShortcutFailed(name: name, detail: error.localizedDescription)
+            throw AppError.focusShortcutFailed(name: Self.helperShortcutName, detail: error.localizedDescription)
+        }
+        if let standardInput {
+            inputPipe.fileHandleForWriting.write(Data(standardInput.utf8))
+            inputPipe.fileHandleForWriting.closeFile()
         }
         process.waitUntilExit()
         guard process.terminationStatus == 0 else {
@@ -3419,8 +3549,10 @@ final class MeetingFocusBridge {
             let detail = String(data: errorData, encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .nilIfBlank ?? "shortcuts exited with status \(process.terminationStatus)"
-            throw AppError.focusShortcutFailed(name: name, detail: detail)
+            throw AppError.focusShortcutFailed(name: Self.helperShortcutName, detail: detail)
         }
+        let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        return String(data: outputData, encoding: .utf8) ?? ""
     }
 }
 

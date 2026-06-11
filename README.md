@@ -78,7 +78,7 @@ Do not use **Web application** or **Desktop app** credentials. If Google shows a
 After sign-in, GWS Menu shows a small **Finish setup** card for optional features:
 
 - **Meeting alerts**: asks for macOS notification permission only when you enable it.
-- **Meeting Focus**: runs Do Not Disturb during accepted meetings if you create two macOS Shortcuts.
+- **Meeting Focus**: opens a one-time helper shortcut installer when you enable it.
 - **Gmail badge**: asks for Gmail unread-count permission only when you enable it.
 - **Open at login**: adds GWS Menu to macOS Login Items.
 
@@ -96,12 +96,12 @@ To customize Workspace shortcuts, click the sliders button next to the **Workspa
 
 ### Meeting Focus
 
-GWS Menu uses macOS Shortcuts instead of private Focus APIs.
+GWS Menu uses a bundled macOS Shortcut helper instead of private Focus APIs.
 
-1. Open **Settings -> Calendar -> Focus shortcuts**.
-2. Create a shortcut named `GWS Menu Focus On` with **Set Focus -> Do Not Disturb -> On**.
-3. Create a shortcut named `GWS Menu Focus Off` with **Set Focus -> Do Not Disturb -> Off**.
-4. Turn on **Settings -> Calendar -> Meeting Focus**.
+1. Open **Settings -> Calendar**.
+2. Turn on **Meeting Focus**, or click **Focus helper -> Install**.
+3. When Shortcuts opens, click **Add Shortcut** once.
+4. Return to GWS Menu. Meeting Focus will use the helper automatically.
 
 Only current accepted meetings with a meeting link or guests trigger Focus. Tentative, unanswered, and declined meetings only show their status color in Upcoming.
 
@@ -122,7 +122,7 @@ The installer closes any running `GWSMenu` process, replaces `~/Applications/GWS
 - The Gmail badge uses `https://www.googleapis.com/auth/gmail.labels` only when enabled.
 - GWS Menu does not read Gmail sender, subject, body, or attachments.
 - GWS Menu does not send desktop mail alerts.
-- Meeting Focus runs your local Shortcuts; your macOS Focus settings decide which apps or people are allowed through.
+- Meeting Focus runs a local helper shortcut; your macOS Focus settings decide which apps or people are allowed through.
 - Google auth is handled by Google Sign-In and Keychain.
 - Google product icons are downloaded locally and ignored by Git.
 
@@ -131,7 +131,7 @@ The installer closes any running `GWSMenu` process, replaces `~/Applications/GWS
 - **`client_secret` error**: delete that OAuth client and create an `iOS` OAuth client instead.
 - **Sign-in opens and immediately closes**: open **Setup**, save the current Client ID once, then sign in again.
 - **Meeting alerts do not appear**: allow GWS Menu in **System Settings -> Notifications**, then enable Meeting alerts again.
-- **Meeting Focus does not change Do Not Disturb**: create both Shortcuts with the exact names `GWS Menu Focus On` and `GWS Menu Focus Off`.
+- **Meeting Focus opens Shortcuts**: click **Add Shortcut** once. The Meeting Focus setting can stay on.
 - **Old behavior after updating**: rerun the installer command; it restarts the menu app after replacing it.
 - **Need icons only**:
 
