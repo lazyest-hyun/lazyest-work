@@ -9,7 +9,7 @@ Native macOS menu bar app for Google Workspace shortcuts, read-only Google Calen
 - Opens Gmail, Calendar, Meet, Chat, Drive, Docs, Sheets, Slides, and custom Google services from the menu bar.
 - Shows your upcoming Google Calendar events and the current or next meeting in the menu bar.
 - Sends optional macOS desktop alerts before meetings.
-- Can run your Do Not Disturb Focus during accepted meetings.
+- Can turn on Do Not Disturb during accepted meetings.
 - Shows an optional Gmail Inbox unread badge, capped as `99+`.
 - Stores Google sign-in credentials in Keychain.
 
@@ -78,7 +78,7 @@ Do not use **Web application** or **Desktop app** credentials. If Google shows a
 After sign-in, GWS Menu shows a small **Finish setup** card for optional features:
 
 - **Meeting alerts**: asks for macOS notification permission only when you enable it.
-- **Meeting Focus**: opens a one-time helper shortcut installer when you enable it.
+- **Do Not Disturb during meetings**: asks for one-time macOS approval the first time you turn it on.
 - **Gmail badge**: asks for Gmail unread-count permission only when you enable it.
 - **Open at login**: adds GWS Menu to macOS Login Items.
 
@@ -86,7 +86,7 @@ After sign-in, GWS Menu shows a small **Finish setup** card for optional feature
 
 Open Settings from the gear button in GWS Menu. Changes save automatically.
 
-- **Calendar**: choose desktop alert timing and optional Meeting Focus.
+- **Calendar**: choose desktop alert timing and optional Do Not Disturb during meetings.
 - **Mail**: enable or disable the Gmail unread badge.
 - **General**: enable Open at login or open the GitHub repository.
 - **Account**: sign out of Google.
@@ -94,16 +94,17 @@ Open Settings from the gear button in GWS Menu. Changes save automatically.
 
 To customize Workspace shortcuts, click the sliders button next to the **Workspace** label on the main menu. The editor uses the same grid layout as the menu.
 
-### Meeting Focus
+### Do Not Disturb During Meetings
 
-GWS Menu uses a bundled macOS Shortcut helper instead of private Focus APIs.
+GWS Menu can turn on macOS Do Not Disturb during accepted meetings.
 
 1. Open **Settings -> Calendar**.
-2. Turn on **Meeting Focus**, or click **Focus helper -> Install**.
-3. When Shortcuts opens, click **Add Shortcut** once.
-4. Return to GWS Menu. Meeting Focus will use the helper automatically.
+2. Turn on **Do Not Disturb during meetings**.
+3. If macOS opens an approval screen, click **Add Shortcut** once.
+4. Return to GWS Menu and turn the setting on again.
 
 Only current accepted meetings with a meeting link or guests trigger Focus. Tentative, unanswered, and declined meetings only show their status color in Upcoming.
+If Do Not Disturb was already on before a meeting starts, GWS Menu leaves it on after the meeting ends.
 
 ## Updating
 
@@ -122,7 +123,8 @@ The installer closes any running `GWSMenu` process, replaces `~/Applications/GWS
 - The Gmail badge uses `https://www.googleapis.com/auth/gmail.labels` only when enabled.
 - GWS Menu does not read Gmail sender, subject, body, or attachments.
 - GWS Menu does not send desktop mail alerts.
-- Meeting Focus runs a local helper shortcut; your macOS Focus settings decide which apps or people are allowed through.
+- Do Not Disturb during meetings uses macOS Do Not Disturb; your Focus settings decide which apps or people are allowed through.
+- GWS Menu does not turn off a Do Not Disturb state that was already active before it touched it.
 - Google auth is handled by Google Sign-In and Keychain.
 - Google product icons are downloaded locally and ignored by Git.
 
@@ -131,7 +133,7 @@ The installer closes any running `GWSMenu` process, replaces `~/Applications/GWS
 - **`client_secret` error**: delete that OAuth client and create an `iOS` OAuth client instead.
 - **Sign-in opens and immediately closes**: open **Setup**, save the current Client ID once, then sign in again.
 - **Meeting alerts do not appear**: allow GWS Menu in **System Settings -> Notifications**, then enable Meeting alerts again.
-- **Meeting Focus opens Shortcuts**: click **Add Shortcut** once. The Meeting Focus setting can stay on.
+- **Do Not Disturb during meetings asks for approval**: click **Add Shortcut** once when macOS opens the approval screen, then turn the setting on again.
 - **Old behavior after updating**: rerun the installer command; it restarts the menu app after replacing it.
 - **Need icons only**:
 

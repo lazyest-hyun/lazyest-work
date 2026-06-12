@@ -29,7 +29,7 @@ Do not use **Web application** credentials. If Google shows a `client_secret`, i
 ## Notifications
 
 - **Settings -> Calendar -> Desktop alerts** uses macOS notifications at the selected meeting alert time.
-- **Settings -> Calendar -> Meeting Focus** can run Do Not Disturb during accepted meetings after **Focus helper -> Install** opens Shortcuts and you add the helper once.
+- **Settings -> Calendar -> Do Not Disturb during meetings** can turn on Do Not Disturb during accepted meetings after one-time macOS approval.
 - **Settings -> Mail -> Inbox unread badge** shows the unread count on the menu bar icon and Gmail tile, capped as `99+`.
 - The Gmail badge does not read sender, subject, body, or attachments, and it does not send desktop mail alerts.
 

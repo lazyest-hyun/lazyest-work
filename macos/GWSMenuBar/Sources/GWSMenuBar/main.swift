@@ -34,6 +34,7 @@ final class AppModel: ObservableObject {
             FocusSettings.saveMeetingFocusEnabled(meetingFocusEnabled)
         }
     }
+    @Published var meetingFocusHelperInstalled = false
     @Published var mailBadgeEnabled: Bool {
         didSet {
             MailBadgeSettings.saveEnabled(mailBadgeEnabled)
@@ -253,7 +254,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 onUpdateWorkspaceApps: { [weak self] apps in self?.updateWorkspaceApps(apps) },
                 onUpdateAlertLeadMinutes: { [weak self] minutes in self?.updateAlertLeadMinutes(minutes) },
                 onUpdateCalendarNotifications: { [weak self] isEnabled in self?.updateCalendarNotificationsEnabled(isEnabled) },
-                onUpdateMeetingFocus: { [weak self] isEnabled in self?.updateMeetingFocusEnabled(isEnabled) },
+                onUpdateMeetingFocus: { [weak self] isEnabled in self?.updateMeetingFocusEnabled(isEnabled) ?? false },
                 onUpdateMailBadge: { [weak self] isEnabled in self?.updateMailBadgeEnabled(isEnabled) },
                 onUpdateLaunchAtLogin: { [weak self] isEnabled in self?.updateLaunchAtLoginEnabled(isEnabled) },
                 onOpenURL: { url in NSWorkspace.shared.open(url) }
@@ -296,6 +297,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     private func restoreAndRefresh() async {
         refreshLaunchAtLoginState()
+        refreshMeetingFocusHelperStatus()
         do {
             try await authClient.restorePreviousSignIn()
             model.connectionState = authClient.connectionState()
@@ -586,23 +588,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
     }
 
-    private func updateMeetingFocusEnabled(_ isEnabled: Bool) {
-        guard model.meetingFocusEnabled != isEnabled else { return }
+    private func updateMeetingFocusEnabled(_ isEnabled: Bool) -> Bool {
+        guard model.meetingFocusEnabled != isEnabled else { return model.meetingFocusEnabled }
         if isEnabled {
             do {
-                guard try meetingFocusBridge.prepareHelperShortcut() else {
-                    model.meetingFocusEnabled = true
-                    model.lastError = "Shortcuts opened. Click Add Shortcut once; Meeting Focus will use it automatically."
+                guard try meetingFocusBridge.isHelperShortcutInstalled() else {
+                    try meetingFocusBridge.openHelperInstaller()
+                    model.meetingFocusHelperInstalled = false
+                    model.meetingFocusEnabled = false
+                    model.lastError = "macOS opened Do Not Disturb approval. Click Add Shortcut once, then turn this on again."
                     model.lastErrorRecovery = nil
                     refreshUI()
-                    return
+                    return false
                 }
+                model.meetingFocusHelperInstalled = true
             } catch {
                 model.meetingFocusEnabled = false
                 model.lastError = userFacingError(error)
                 model.lastErrorRecovery = nil
                 refreshUI()
-                return
+                return false
             }
         }
         model.meetingFocusEnabled = isEnabled
@@ -610,6 +615,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         model.lastErrorRecovery = nil
         refreshUI()
         syncMeetingFocus()
+        return model.meetingFocusEnabled
+    }
+
+    private func refreshMeetingFocusHelperStatus() {
+        let isInstalled = (try? meetingFocusBridge.isHelperShortcutInstalled()) ?? false
+        model.meetingFocusHelperInstalled = isInstalled
+        if !isInstalled, model.meetingFocusEnabled {
+            model.meetingFocusEnabled = false
+        }
     }
 
     private func updateMailBadgeEnabled(_ isEnabled: Bool) {
@@ -868,6 +882,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         } else {
             updateNow()
             refreshLaunchAtLoginState()
+            refreshMeetingFocusHelperStatus()
             refreshUI()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
@@ -937,7 +952,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             return "macOS notification permission is off. Open System Settings, allow GWS Menu notifications, then enable Meeting alerts again."
         }
         if lowercased.contains("focus shortcut") || lowercased.contains("shortcuts") {
-            return "Meeting Focus needs its helper shortcut. Open Settings > Calendar > Focus helper, click Install, then add the shortcut once."
+            return "Do Not Disturb during meetings needs one-time macOS approval. Turn it on again and click Add Shortcut when macOS asks."
         }
         if lowercased.contains("login item") || lowercased.contains("launch") {
             return "Open at login could not be changed. Check System Settings > General > Login Items."
@@ -1006,7 +1021,7 @@ struct GWSMenuPopover: View {
     let onUpdateWorkspaceApps: ([WorkspaceApp]) -> Void
     let onUpdateAlertLeadMinutes: (Int) -> Void
     let onUpdateCalendarNotifications: (Bool) -> Void
-    let onUpdateMeetingFocus: (Bool) -> Void
+    let onUpdateMeetingFocus: (Bool) -> Bool
     let onUpdateMailBadge: (Bool) -> Void
     let onUpdateLaunchAtLogin: (Bool) -> Void
     let onOpenURL: (URL) -> Void
@@ -1028,7 +1043,6 @@ struct GWSMenuPopover: View {
                     onSignOut: onSignOut,
                     onResetGoogleSetup: onResetGoogleSetup,
                     onOpenNotificationSettings: openNotificationSettings,
-                    onOpenShortcuts: openShortcuts,
                     onOpenGitHub: openGitHub,
                     onUpdateAlertLeadMinutes: onUpdateAlertLeadMinutes,
                     onUpdateCalendarNotifications: onUpdateCalendarNotifications,
@@ -1165,20 +1179,6 @@ struct GWSMenuPopover: View {
     private func openNotificationSettings() {
         guard let url = notificationSettingsURL() else { return }
         onOpenURL(url)
-    }
-
-    private func openShortcuts() {
-        let url = AppResourceLocator.url(
-            named: "DND Raycast",
-            extension: "shortcut",
-            subdirectory: "FocusShortcuts"
-        ) ?? URL(string: "shortcuts://")
-        guard let url else { return }
-        if url.isFileURL {
-            try? SystemOpener.openFile(url)
-        } else {
-            onOpenURL(url)
-        }
     }
 
     private func openGitHub() {
@@ -2364,11 +2364,10 @@ struct AppSettingsView: View {
     let onSignOut: () -> Void
     let onResetGoogleSetup: () -> Void
     let onOpenNotificationSettings: () -> Void
-    let onOpenShortcuts: () -> Void
     let onOpenGitHub: () -> Void
     let onUpdateAlertLeadMinutes: (Int) -> Void
     let onUpdateCalendarNotifications: (Bool) -> Void
-    let onUpdateMeetingFocus: (Bool) -> Void
+    let onUpdateMeetingFocus: (Bool) -> Bool
     let onUpdateMailBadge: (Bool) -> Void
     let onUpdateLaunchAtLogin: (Bool) -> Void
 
@@ -2383,11 +2382,10 @@ struct AppSettingsView: View {
         onSignOut: @escaping () -> Void,
         onResetGoogleSetup: @escaping () -> Void,
         onOpenNotificationSettings: @escaping () -> Void,
-        onOpenShortcuts: @escaping () -> Void,
         onOpenGitHub: @escaping () -> Void,
         onUpdateAlertLeadMinutes: @escaping (Int) -> Void,
         onUpdateCalendarNotifications: @escaping (Bool) -> Void,
-        onUpdateMeetingFocus: @escaping (Bool) -> Void,
+        onUpdateMeetingFocus: @escaping (Bool) -> Bool,
         onUpdateMailBadge: @escaping (Bool) -> Void,
         onUpdateLaunchAtLogin: @escaping (Bool) -> Void
     ) {
@@ -2401,7 +2399,6 @@ struct AppSettingsView: View {
         self.onSignOut = onSignOut
         self.onResetGoogleSetup = onResetGoogleSetup
         self.onOpenNotificationSettings = onOpenNotificationSettings
-        self.onOpenShortcuts = onOpenShortcuts
         self.onOpenGitHub = onOpenGitHub
         self.onUpdateAlertLeadMinutes = onUpdateAlertLeadMinutes
         self.onUpdateCalendarNotifications = onUpdateCalendarNotifications
@@ -2453,19 +2450,10 @@ struct AppSettingsView: View {
                     )
                     AlertLeadSettingRow(selectedMinutes: alertLeadMinutesBinding)
                     NotificationToggleRow(
-                        title: "Meeting Focus",
-                        subtitle: "Run Do Not Disturb during accepted meetings after one helper install.",
+                        title: "Do Not Disturb during meetings",
+                        subtitle: "Turns on Do Not Disturb only for accepted meetings. First turn-on may ask for approval.",
                         systemImage: "moon.zzz",
                         isOn: meetingFocusBinding
-                    )
-                    SettingsActionRow(
-                        title: "Focus helper",
-                        subtitle: "Install the helper shortcut if Meeting Focus asks for it.",
-                        systemImage: "sparkles",
-                        buttonTitle: "Install",
-                        buttonRole: nil,
-                        isDisabled: false,
-                        action: onOpenShortcuts
                     )
                     SettingsActionRow(
                         title: "Notification settings",
@@ -2547,8 +2535,7 @@ struct AppSettingsView: View {
         Binding(
             get: { draftMeetingFocusEnabled },
             set: { newValue in
-                draftMeetingFocusEnabled = newValue
-                onUpdateMeetingFocus(newValue)
+                draftMeetingFocusEnabled = onUpdateMeetingFocus(newValue)
             }
         )
     }
@@ -3451,108 +3438,6 @@ enum SystemOpener {
         if process.terminationStatus != 0 {
             throw AppError.focusShortcutFailed(name: url.lastPathComponent, detail: "open exited with status \(process.terminationStatus)")
         }
-    }
-}
-
-final class MeetingFocusBridge {
-    private static let helperShortcutName = "DND Raycast"
-
-    private let managedActiveKey = "meetingFocusManagedActive"
-    private let managedEventIDKey = "meetingFocusManagedEventID"
-
-    func prepareHelperShortcut() throws -> Bool {
-        if try isHelperShortcutInstalled() {
-            return true
-        }
-        try openHelperInstaller()
-        return false
-    }
-
-    func apply(_ state: MeetingFocusState) throws {
-        let defaults = UserDefaults.standard
-        switch state {
-        case .active(_, let eventID):
-            if defaults.bool(forKey: managedActiveKey) {
-                if defaults.string(forKey: managedEventIDKey) != eventID {
-                    defaults.set(eventID, forKey: managedEventIDKey)
-                }
-                return
-            }
-            guard try isHelperShortcutInstalled() else {
-                throw AppError.focusShortcutFailed(name: Self.helperShortcutName, detail: "helper shortcut is not installed")
-            }
-            try runHelperShortcut(command: "on")
-            defaults.set(true, forKey: managedActiveKey)
-            defaults.set(eventID, forKey: managedEventIDKey)
-        case .inactive:
-            guard defaults.bool(forKey: managedActiveKey) else {
-                return
-            }
-            guard try isHelperShortcutInstalled() else {
-                defaults.set(false, forKey: managedActiveKey)
-                defaults.removeObject(forKey: managedEventIDKey)
-                return
-            }
-            try runHelperShortcut(command: "off")
-            defaults.set(false, forKey: managedActiveKey)
-            defaults.removeObject(forKey: managedEventIDKey)
-        }
-    }
-
-    private func isHelperShortcutInstalled() throws -> Bool {
-        let output = try runShortcuts(arguments: ["list"], standardInput: nil)
-        return output
-            .split(separator: "\n")
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .contains(Self.helperShortcutName)
-    }
-
-    private func openHelperInstaller() throws {
-        guard let url = AppResourceLocator.url(
-            named: Self.helperShortcutName,
-            extension: "shortcut",
-            subdirectory: "FocusShortcuts"
-        ) else {
-            throw AppError.focusShortcutFailed(name: Self.helperShortcutName, detail: "bundled helper shortcut is missing")
-        }
-        try SystemOpener.openFile(url)
-    }
-
-    private func runHelperShortcut(command: String) throws {
-        _ = try runShortcuts(arguments: ["run", Self.helperShortcutName], standardInput: command)
-    }
-
-    private func runShortcuts(arguments: [String], standardInput: String?) throws -> String {
-        let process = Process()
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
-        let inputPipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/shortcuts")
-        process.arguments = arguments
-        process.standardOutput = outputPipe
-        process.standardError = errorPipe
-        if standardInput != nil {
-            process.standardInput = inputPipe
-        }
-        do {
-            try process.run()
-        } catch {
-            throw AppError.focusShortcutFailed(name: Self.helperShortcutName, detail: error.localizedDescription)
-        }
-        if let standardInput {
-            inputPipe.fileHandleForWriting.write(Data(standardInput.utf8))
-            inputPipe.fileHandleForWriting.closeFile()
-        }
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-            let detail = String(data: errorData, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .nilIfBlank ?? "shortcuts exited with status \(process.terminationStatus)"
-            throw AppError.focusShortcutFailed(name: Self.helperShortcutName, detail: detail)
-        }
-        let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-        return String(data: outputData, encoding: .utf8) ?? ""
     }
 }
 
