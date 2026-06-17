@@ -120,3 +120,135 @@ public enum MeetingFocusPolicy {
         return .active(until: event.end, eventID: event.id)
     }
 }
+
+public enum MeetingNotificationPolicy {
+    public static func shouldSuppressNotifications<Event: FocusEventRepresentable>(
+        events: [Event],
+        at date: Date
+    ) -> Bool {
+        MeetingFocusPolicy.desiredState(
+            events: events,
+            now: date,
+            isEnabled: true
+        ) != .inactive
+    }
+}
+
+public struct TeamsPresenceSetRequest: Equatable {
+    public let sessionID: String
+    public let availability: String
+    public let activity: String
+    public let expirationDuration: String
+    public let expiresAt: Date
+}
+
+public struct TeamsManagedPresenceSession: Codable, Equatable {
+    public let eventID: String
+    public let sessionID: String
+    public let userID: String
+    public let expiresAt: Date
+
+    public init(eventID: String, sessionID: String, userID: String, expiresAt: Date) {
+        self.eventID = eventID
+        self.sessionID = sessionID
+        self.userID = userID
+        self.expiresAt = expiresAt
+    }
+}
+
+public enum TeamsPresencePolicy {
+    public static let graphMinimumDurationMinutes = 5
+    public static let graphMaximumDurationMinutes = 240
+
+    public static func desiredState<Event: FocusEventRepresentable>(
+        events: [Event],
+        now: Date,
+        isEnabled: Bool
+    ) -> MeetingFocusState {
+        MeetingFocusPolicy.desiredState(events: events, now: now, isEnabled: isEnabled)
+    }
+
+    public static func setPresenceRequest(
+        sessionID: String,
+        until end: Date,
+        now: Date
+    ) -> TeamsPresenceSetRequest {
+        let remainingMinutes = Int(ceil(max(0, end.timeIntervalSince(now)) / 60))
+        let clampedMinutes = min(
+            max(remainingMinutes, graphMinimumDurationMinutes),
+            graphMaximumDurationMinutes
+        )
+        return TeamsPresenceSetRequest(
+            sessionID: sessionID,
+            availability: "Busy",
+            activity: "InAConferenceCall",
+            expirationDuration: graphDuration(minutes: clampedMinutes),
+            expiresAt: now.addingTimeInterval(TimeInterval(clampedMinutes * 60))
+        )
+    }
+
+    public static func shouldRefreshManagedPresence(
+        eventID: String,
+        managedSession: TeamsManagedPresenceSession?,
+        now: Date,
+        refreshLeadSeconds: TimeInterval = 300
+    ) -> Bool {
+        guard let managedSession,
+              managedSession.eventID == eventID else {
+            return true
+        }
+        return managedSession.expiresAt.timeIntervalSince(now) <= refreshLeadSeconds
+    }
+
+    public static func managedSession(
+        eventID: String,
+        request: TeamsPresenceSetRequest,
+        userID: String
+    ) -> TeamsManagedPresenceSession {
+        TeamsManagedPresenceSession(
+            eventID: eventID,
+            sessionID: request.sessionID,
+            userID: userID,
+            expiresAt: request.expiresAt
+        )
+    }
+
+    private static func graphDuration(minutes: Int) -> String {
+        if minutes == graphMaximumDurationMinutes {
+            return "PT4H"
+        }
+        return "PT\(minutes)M"
+    }
+}
+
+public enum FocusStatusParser {
+    public static func parse(_ output: String) -> Bool? {
+        let normalized = output
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if normalized.isEmpty {
+            return false
+        }
+        if normalized.contains("방해금지") {
+            return true
+        }
+        if ["true", "on", "enabled", "active", "1", "yes"].contains(normalized) {
+            return true
+        }
+        if ["false", "off", "disabled", "inactive", "0", "no"].contains(normalized) {
+            return false
+        }
+        let tokens = Set(
+            normalized.split { !$0.isLetter && !$0.isNumber }
+                .map(String.init)
+        )
+        let activeTokens: Set<String> = ["true", "on", "enabled", "active", "1", "yes"]
+        let inactiveTokens: Set<String> = ["false", "off", "disabled", "inactive", "0", "no"]
+        let hasActiveToken = !tokens.isDisjoint(with: activeTokens)
+        let hasInactiveToken = !tokens.isDisjoint(with: inactiveTokens)
+        if hasActiveToken != hasInactiveToken {
+            return hasActiveToken
+        }
+        return nil
+    }
+}

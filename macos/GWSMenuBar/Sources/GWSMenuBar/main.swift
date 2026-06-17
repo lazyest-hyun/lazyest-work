@@ -35,6 +35,14 @@ final class AppModel: ObservableObject {
         }
     }
     @Published var meetingFocusHelperInstalled = false
+    @Published var meetingFocusApprovalPending = false
+    @Published var teamsPresenceEnabled: Bool {
+        didSet {
+            TeamsPresenceSettings.saveEnabled(teamsPresenceEnabled)
+        }
+    }
+    @Published var teamsConnectionState = MicrosoftConnectionState.missingSetup
+    @Published var teamsSetupConfig = MicrosoftSetupSettings.load()
     @Published var mailBadgeEnabled: Bool {
         didSet {
             MailBadgeSettings.saveEnabled(mailBadgeEnabled)
@@ -51,6 +59,7 @@ final class AppModel: ObservableObject {
         alertLeadMinutes = AlertSettings.loadLeadMinutes()
         calendarNotificationsEnabled = AlertSettings.loadCalendarNotificationsEnabled()
         meetingFocusEnabled = FocusSettings.loadMeetingFocusEnabled()
+        teamsPresenceEnabled = TeamsPresenceSettings.loadEnabled()
         mailBadgeEnabled = MailBadgeSettings.loadEnabled()
         launchAtLoginEnabled = LaunchAtLoginSettings.isEnabled()
         setupChecklistDismissed = SetupChecklistSettings.loadDismissed()
@@ -185,10 +194,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private lazy var authClient = GoogleSignInAuthClient(authWindow: authWindow)
     private lazy var calendarService = GoogleCalendarService(authClient: authClient)
     private lazy var gmailService = GoogleGmailService(authClient: authClient)
+    private lazy var microsoftAuthClient = MicrosoftGraphAuthClient(authWindow: authWindow)
+    private lazy var teamsPresenceService = MicrosoftTeamsPresenceService(authClient: microsoftAuthClient)
     private let meetingFocusBridge = MeetingFocusBridge()
     private lazy var popover: NSPopover = makePopover()
     private var cancellables = Set<AnyCancellable>()
     private var timer: Timer?
+    private var meetingFocusApprovalTask: Task<Void, Never>?
+    private var teamsPresenceTask: Task<Void, Never>?
     private var statusIconUnreadText: String?
     private var renderedStatusTitle: String?
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -213,11 +226,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     func application(_ application: NSApplication, open urls: [URL]) {
         for url in urls {
+            if microsoftAuthClient.handle(url: url) {
+                continue
+            }
             _ = authClient.handle(url: url)
         }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        meetingFocusApprovalTask?.cancel()
+        teamsPresenceTask?.cancel()
         turnOffManagedMeetingFocus()
     }
 
@@ -254,7 +272,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 onUpdateWorkspaceApps: { [weak self] apps in self?.updateWorkspaceApps(apps) },
                 onUpdateAlertLeadMinutes: { [weak self] minutes in self?.updateAlertLeadMinutes(minutes) },
                 onUpdateCalendarNotifications: { [weak self] isEnabled in self?.updateCalendarNotificationsEnabled(isEnabled) },
+                onSendTestCalendarNotification: { [weak self] in self?.sendTestCalendarNotificationFromSettings() },
                 onUpdateMeetingFocus: { [weak self] isEnabled in self?.updateMeetingFocusEnabled(isEnabled) ?? false },
+                onApproveMeetingFocus: { [weak self] in self?.requestMeetingFocusApproval() },
+                onSaveMicrosoftSetup: { [weak self] config in
+                    self?.saveMicrosoftSetup(config) ?? .failure("App is not ready to save Microsoft setup.")
+                },
+                onConnectMicrosoftTeams: { [weak self] in self?.connectMicrosoftTeams() },
+                onSignOutMicrosoftTeams: { [weak self] in self?.signOutMicrosoftTeams() },
+                onClearMicrosoftTeamsPresence: { [weak self] in self?.clearMicrosoftTeamsPresenceFromSettings() },
+                onUpdateTeamsPresence: { [weak self] isEnabled in self?.updateTeamsPresenceEnabled(isEnabled) ?? false },
                 onUpdateMailBadge: { [weak self] isEnabled in self?.updateMailBadgeEnabled(isEnabled) },
                 onUpdateLaunchAtLogin: { [weak self] isEnabled in self?.updateLaunchAtLoginEnabled(isEnabled) },
                 onOpenURL: { url in NSWorkspace.shared.open(url) }
@@ -298,6 +325,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private func restoreAndRefresh() async {
         refreshLaunchAtLoginState()
         refreshMeetingFocusHelperStatus()
+        refreshMicrosoftConnectionState()
         do {
             try await authClient.restorePreviousSignIn()
             model.connectionState = authClient.connectionState()
@@ -309,6 +337,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             model.lastErrorRecovery = nil
             refreshUI()
             await syncCalendarNotifications()
+            syncMeetingFocus()
+            syncTeamsPresence()
         }
     }
 
@@ -321,6 +351,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             refreshUI()
             cancelCalendarNotifications()
             syncMeetingFocus()
+            syncTeamsPresence()
             return
         }
 
@@ -372,6 +403,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             await syncCalendarNotifications()
         }
         syncMeetingFocus()
+        syncTeamsPresence()
     }
 
     private func refreshUI() {
@@ -526,6 +558,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         model.connectionState = authClient.connectionState()
         cancelCalendarNotifications()
         turnOffManagedMeetingFocus()
+        syncTeamsPresence()
         refreshUI()
     }
 
@@ -547,6 +580,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 model.connectionState = .missingBundleConfig
                 cancelCalendarNotifications()
                 turnOffManagedMeetingFocus()
+                syncTeamsPresence()
                 refreshUI()
                 relaunchApp()
             } catch {
@@ -589,20 +623,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     private func updateMeetingFocusEnabled(_ isEnabled: Bool) -> Bool {
+        if !isEnabled {
+            cancelPendingMeetingFocusApproval()
+            guard model.meetingFocusEnabled else { return false }
+            model.meetingFocusEnabled = false
+            model.lastError = nil
+            model.lastErrorRecovery = nil
+            refreshUI()
+            syncMeetingFocus()
+            return false
+        }
+
         guard model.meetingFocusEnabled != isEnabled else { return model.meetingFocusEnabled }
         if isEnabled {
             do {
                 guard try meetingFocusBridge.isHelperShortcutInstalled() else {
-                    try meetingFocusBridge.openHelperInstaller()
                     model.meetingFocusHelperInstalled = false
+                    model.meetingFocusApprovalPending = true
                     model.meetingFocusEnabled = false
-                    model.lastError = "macOS opened Do Not Disturb approval. Click Add Shortcut once, then turn this on again."
+                    model.lastError = nil
                     model.lastErrorRecovery = nil
                     refreshUI()
                     return false
                 }
+                cancelPendingMeetingFocusApproval()
                 model.meetingFocusHelperInstalled = true
             } catch {
+                cancelPendingMeetingFocusApproval()
                 model.meetingFocusEnabled = false
                 model.lastError = userFacingError(error)
                 model.lastErrorRecovery = nil
@@ -618,11 +665,234 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         return model.meetingFocusEnabled
     }
 
+    private func requestMeetingFocusApproval() {
+        do {
+            guard try meetingFocusBridge.isHelperShortcutInstalled() else {
+                try meetingFocusBridge.openHelperInstaller()
+                model.meetingFocusHelperInstalled = false
+                model.meetingFocusApprovalPending = true
+                model.lastError = "Click Add Shortcut once in macOS. GWS Menu turns Do Not Disturb on automatically after approval."
+                model.lastErrorRecovery = nil
+                refreshUI()
+                watchForMeetingFocusApproval()
+                return
+            }
+            model.meetingFocusApprovalPending = true
+            _ = enableMeetingFocusAfterHelperApproval()
+        } catch {
+            cancelPendingMeetingFocusApproval()
+            model.meetingFocusEnabled = false
+            model.lastError = userFacingError(error)
+            model.lastErrorRecovery = nil
+            refreshUI()
+        }
+    }
+
     private func refreshMeetingFocusHelperStatus() {
         let isInstalled = (try? meetingFocusBridge.isHelperShortcutInstalled()) ?? false
         model.meetingFocusHelperInstalled = isInstalled
+        if isInstalled, enableMeetingFocusAfterHelperApproval() {
+            return
+        }
         if !isInstalled, model.meetingFocusEnabled {
             model.meetingFocusEnabled = false
+        }
+    }
+
+    private func watchForMeetingFocusApproval() {
+        meetingFocusApprovalTask?.cancel()
+        meetingFocusApprovalTask = Task { [weak self] in
+            for _ in 0..<60 {
+                guard !Task.isCancelled else { return }
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard !Task.isCancelled else { return }
+                let didEnable = await MainActor.run {
+                    self?.enableMeetingFocusAfterHelperApproval() ?? false
+                }
+                if didEnable { return }
+            }
+            await MainActor.run {
+                self?.finishMeetingFocusApprovalWatch()
+            }
+        }
+    }
+
+    private func enableMeetingFocusAfterHelperApproval() -> Bool {
+        guard model.meetingFocusApprovalPending else { return false }
+        guard (try? meetingFocusBridge.isHelperShortcutInstalled()) == true else { return false }
+        meetingFocusApprovalTask?.cancel()
+        meetingFocusApprovalTask = nil
+        model.meetingFocusApprovalPending = false
+        model.meetingFocusHelperInstalled = true
+        model.meetingFocusEnabled = true
+        model.lastError = nil
+        model.lastErrorRecovery = nil
+        refreshUI()
+        syncMeetingFocus()
+        return true
+    }
+
+    private func finishMeetingFocusApprovalWatch() {
+        meetingFocusApprovalTask = nil
+        guard model.meetingFocusApprovalPending else { return }
+        model.meetingFocusApprovalPending = false
+        model.lastError = "Do Not Disturb approval was not completed. Click Approve to retry."
+        model.lastErrorRecovery = nil
+        refreshUI()
+    }
+
+    private func cancelPendingMeetingFocusApproval() {
+        meetingFocusApprovalTask?.cancel()
+        meetingFocusApprovalTask = nil
+        model.meetingFocusApprovalPending = false
+    }
+
+    private func refreshMicrosoftConnectionState() {
+        microsoftAuthClient.configure(model.teamsSetupConfig)
+        model.teamsConnectionState = microsoftAuthClient.connectionState()
+    }
+
+    private func saveMicrosoftSetup(_ config: MicrosoftSetupConfig) -> GoogleSetupResult {
+        do {
+            let normalized = try MicrosoftSetupConfig.normalized(clientID: config.clientID, tenantID: config.tenantID)
+            model.teamsSetupConfig = normalized
+            MicrosoftSetupSettings.save(normalized)
+            microsoftAuthClient.configure(normalized)
+            refreshMicrosoftConnectionState()
+            refreshUI()
+            return .success("Microsoft setup saved. Connect once, then GWS Menu keeps the token in Keychain.")
+        } catch {
+            return .failure(error.localizedDescription)
+        }
+    }
+
+    private func connectMicrosoftTeams() {
+        guard !model.isBusy else { return }
+        do {
+            let normalized = try MicrosoftSetupConfig.normalized(
+                clientID: model.teamsSetupConfig.clientID,
+                tenantID: model.teamsSetupConfig.tenantID
+            )
+            model.teamsSetupConfig = normalized
+            MicrosoftSetupSettings.save(normalized)
+            microsoftAuthClient.configure(normalized)
+        } catch {
+            model.lastError = error.localizedDescription
+            model.lastErrorRecovery = nil
+            refreshUI()
+            return
+        }
+
+        popover.performClose(nil)
+        model.isBusy = true
+        model.lastError = nil
+        model.lastErrorRecovery = nil
+        refreshUI()
+
+        Task {
+            do {
+                try await teamsPresenceService.clearManagedPresenceIfNeeded()
+                try await microsoftAuthClient.signIn(config: model.teamsSetupConfig)
+                refreshMicrosoftConnectionState()
+                syncTeamsPresence()
+            } catch {
+                model.lastError = userFacingError(error)
+                model.lastErrorRecovery = nil
+                refreshMicrosoftConnectionState()
+            }
+            model.isBusy = false
+            refreshUI()
+        }
+    }
+
+    private func signOutMicrosoftTeams() {
+        model.teamsPresenceEnabled = false
+        teamsPresenceTask?.cancel()
+        teamsPresenceTask = Task {
+            do {
+                try await teamsPresenceService.clearManagedPresenceIfNeeded()
+                try microsoftAuthClient.signOut()
+                teamsPresenceService.clearLocalManagedState()
+                refreshMicrosoftConnectionState()
+                model.lastError = nil
+                model.lastErrorRecovery = nil
+            } catch {
+                model.lastError = userFacingError(error)
+                model.lastErrorRecovery = nil
+            }
+            refreshUI()
+        }
+    }
+
+    private func clearMicrosoftTeamsPresenceFromSettings() {
+        teamsPresenceTask?.cancel()
+        teamsPresenceTask = Task {
+            do {
+                try await teamsPresenceService.clearManagedPresenceIfNeeded()
+                model.lastError = nil
+                model.lastErrorRecovery = nil
+            } catch {
+                model.lastError = userFacingError(error)
+                model.lastErrorRecovery = nil
+            }
+            refreshUI()
+        }
+    }
+
+    private func updateTeamsPresenceEnabled(_ isEnabled: Bool) -> Bool {
+        if !isEnabled {
+            guard model.teamsPresenceEnabled else { return false }
+            model.teamsPresenceEnabled = false
+            model.lastError = nil
+            model.lastErrorRecovery = nil
+            refreshUI()
+            syncTeamsPresence()
+            return false
+        }
+
+        refreshMicrosoftConnectionState()
+        guard model.teamsSetupConfig.isComplete else {
+            model.teamsPresenceEnabled = false
+            model.lastError = "Save Microsoft setup before enabling Teams Busy."
+            model.lastErrorRecovery = nil
+            refreshUI()
+            return false
+        }
+        guard model.teamsConnectionState.isConnected else {
+            model.teamsPresenceEnabled = false
+            model.lastError = "Connect Microsoft Teams once before enabling Teams Busy."
+            model.lastErrorRecovery = nil
+            refreshUI()
+            return false
+        }
+
+        model.teamsPresenceEnabled = true
+        model.lastError = nil
+        model.lastErrorRecovery = nil
+        refreshUI()
+        syncTeamsPresence()
+        return true
+    }
+
+    private func syncTeamsPresence() {
+        let desiredState = TeamsPresencePolicy.desiredState(
+            events: model.events,
+            now: model.now,
+            isEnabled: model.teamsPresenceEnabled &&
+                model.connectionState.isConnected &&
+                model.teamsConnectionState.isConnected
+        )
+        teamsPresenceTask?.cancel()
+        teamsPresenceTask = Task {
+            do {
+                try await teamsPresenceService.apply(desiredState, now: model.now)
+                refreshMicrosoftConnectionState()
+            } catch {
+                model.lastError = userFacingError(error)
+                model.lastErrorRecovery = nil
+                refreshMicrosoftConnectionState()
+            }
+            refreshUI()
         }
     }
 
@@ -692,6 +962,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             guard fireDate > now.addingTimeInterval(3) else {
                 continue
             }
+            guard !shouldSuppressCalendarNotification(at: fireDate) else {
+                continue
+            }
 
             let content = UNMutableNotificationContent()
             content.title = event.title
@@ -716,6 +989,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let center = UNUserNotificationCenter.current()
         center.removeAllPendingNotificationRequests()
         center.removeAllDeliveredNotifications()
+    }
+
+    private func sendTestCalendarNotificationFromSettings() {
+        model.lastError = nil
+        model.lastErrorRecovery = nil
+        model.isBusy = true
+        refreshUI()
+
+        Task {
+            await sendTestCalendarNotification()
+            model.isBusy = false
+            refreshUI()
+        }
+    }
+
+    private func sendTestCalendarNotification() async {
+        do {
+            guard !shouldSuppressCalendarNotification() else {
+                return
+            }
+
+            try await ensureNotificationAuthorization()
+
+            let content = UNMutableNotificationContent()
+            content.title = "GWS Menu"
+            content.subtitle = "Test meeting alert"
+            content.body = "Meeting notifications are working."
+            content.sound = .default
+            content.userInfo = [
+                "type": "calendar-test",
+                "url": WorkspaceApp.calendarURL.absoluteString
+            ]
+
+            let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 1, repeats: false)
+            let request = UNNotificationRequest(
+                identifier: "gws-menu-test-\(UUID().uuidString)",
+                content: content,
+                trigger: trigger
+            )
+            try await addNotificationRequest(request)
+        } catch {
+            model.lastError = userFacingError(error)
+            model.lastErrorRecovery = .notificationSettings
+        }
+    }
+
+    private func shouldSuppressCalendarNotification(at date: Date = Date()) -> Bool {
+        return MeetingNotificationPolicy.shouldSuppressNotifications(
+            events: model.events,
+            at: date
+        )
     }
 
     private func syncMeetingFocus() {
@@ -883,6 +1207,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             updateNow()
             refreshLaunchAtLoginState()
             refreshMeetingFocusHelperStatus()
+            refreshMicrosoftConnectionState()
             refreshUI()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
@@ -942,6 +1267,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         if lowercased.contains("redirect_uri_mismatch") || lowercased.contains("url scheme") {
             return "Google could not return to GWS Menu. Open Setup and save the generated URL scheme, then try signing in again."
         }
+        if lowercased.contains("microsoft") || lowercased.contains("entra") || lowercased.contains("graph") {
+            if lowercased.contains("keychain") {
+                return "Microsoft Teams status could not read or save credentials in Keychain. Try Connect again from Settings."
+            }
+            if lowercased.contains("aadsts65001") || lowercased.contains("admin") || lowercased.contains("consent") {
+                return "Microsoft Teams status needs Graph Presence permission. Your Microsoft tenant may require admin approval."
+            }
+            if lowercased.contains("invalid_client") {
+                return "Microsoft Client ID is not valid for this app. Check the Application client ID in Settings."
+            }
+            if lowercased.contains("redirect") || lowercased.contains("reply url") {
+                return "Microsoft redirect URI does not match. Add gwsmenu://microsoft-auth to the app registration."
+            }
+            if lowercased.contains("presence") || lowercased.contains("presencereadwrite") {
+                return "Microsoft Teams status needs Presence.ReadWrite permission. Check API permissions and consent."
+            }
+            return message
+        }
         if lowercased.contains("keychain") {
             return "Google Sign-In could not read or save credentials. Open Setup, save the current Client ID once, then try Sign in again."
         }
@@ -952,7 +1295,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             return "macOS notification permission is off. Open System Settings, allow GWS Menu notifications, then enable Meeting alerts again."
         }
         if lowercased.contains("focus shortcut") || lowercased.contains("shortcuts") {
-            return "Do Not Disturb during meetings needs one-time macOS approval. Turn it on again and click Add Shortcut when macOS asks."
+            return "Do Not Disturb during meetings needs one-time macOS approval. Click Approve, then Add Shortcut when macOS asks."
         }
         if lowercased.contains("login item") || lowercased.contains("launch") {
             return "Open at login could not be changed. Check System Settings > General > Login Items."
@@ -1021,7 +1364,14 @@ struct GWSMenuPopover: View {
     let onUpdateWorkspaceApps: ([WorkspaceApp]) -> Void
     let onUpdateAlertLeadMinutes: (Int) -> Void
     let onUpdateCalendarNotifications: (Bool) -> Void
+    let onSendTestCalendarNotification: () -> Void
     let onUpdateMeetingFocus: (Bool) -> Bool
+    let onApproveMeetingFocus: () -> Void
+    let onSaveMicrosoftSetup: (MicrosoftSetupConfig) -> GoogleSetupResult
+    let onConnectMicrosoftTeams: () -> Void
+    let onSignOutMicrosoftTeams: () -> Void
+    let onClearMicrosoftTeamsPresence: () -> Void
+    let onUpdateTeamsPresence: (Bool) -> Bool
     let onUpdateMailBadge: (Bool) -> Void
     let onUpdateLaunchAtLogin: (Bool) -> Void
     let onOpenURL: (URL) -> Void
@@ -1037,6 +1387,12 @@ struct GWSMenuPopover: View {
                     initialAlertLeadMinutes: model.alertLeadMinutes,
                     initialCalendarNotificationsEnabled: model.calendarNotificationsEnabled,
                     initialMeetingFocusEnabled: model.meetingFocusEnabled,
+                    currentMeetingFocusEnabled: model.meetingFocusEnabled,
+                    meetingFocusApprovalPending: model.meetingFocusApprovalPending,
+                    initialTeamsPresenceEnabled: model.teamsPresenceEnabled,
+                    currentTeamsPresenceEnabled: model.teamsPresenceEnabled,
+                    microsoftConnectionState: model.teamsConnectionState,
+                    initialMicrosoftSetupConfig: model.teamsSetupConfig,
                     initialMailBadgeEnabled: model.mailBadgeEnabled,
                     initialLaunchAtLoginEnabled: model.launchAtLoginEnabled,
                     onDone: { screen = .home },
@@ -1046,7 +1402,14 @@ struct GWSMenuPopover: View {
                     onOpenGitHub: openGitHub,
                     onUpdateAlertLeadMinutes: onUpdateAlertLeadMinutes,
                     onUpdateCalendarNotifications: onUpdateCalendarNotifications,
+                    onSendTestCalendarNotification: onSendTestCalendarNotification,
                     onUpdateMeetingFocus: onUpdateMeetingFocus,
+                    onApproveMeetingFocus: onApproveMeetingFocus,
+                    onSaveMicrosoftSetup: onSaveMicrosoftSetup,
+                    onConnectMicrosoftTeams: onConnectMicrosoftTeams,
+                    onSignOutMicrosoftTeams: onSignOutMicrosoftTeams,
+                    onClearMicrosoftTeamsPresence: onClearMicrosoftTeamsPresence,
+                    onUpdateTeamsPresence: onUpdateTeamsPresence,
                     onUpdateMailBadge: onUpdateMailBadge,
                     onUpdateLaunchAtLogin: onUpdateLaunchAtLogin
                 )
@@ -1177,7 +1540,7 @@ struct GWSMenuPopover: View {
     }
 
     private func openNotificationSettings() {
-        guard let url = notificationSettingsURL() else { return }
+        guard let url = Self.notificationSettingsURL() else { return }
         onOpenURL(url)
     }
 
@@ -1186,7 +1549,7 @@ struct GWSMenuPopover: View {
         onOpenURL(url)
     }
 
-    private func notificationSettingsURL() -> URL? {
+    static func notificationSettingsURL() -> URL? {
         let bundleID = Bundle.main.bundleIdentifier ?? "io.github.gwsmenu.app"
         return URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=\(bundleID)")
             ?? URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension")
@@ -1606,6 +1969,49 @@ struct NotificationToggleRow: View {
             Toggle("", isOn: $isOn)
                 .labelsHidden()
                 .toggleStyle(.switch)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .menuSurface()
+    }
+}
+
+struct MeetingFocusToggleRow: View {
+    let title: String
+    let subtitle: String
+    let systemImage: String
+    let isApprovalPending: Bool
+    @Binding var isOn: Bool
+    let onApprove: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: systemImage)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 22)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 13, weight: .medium))
+                Text(subtitle)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            Spacer(minLength: 8)
+
+            if isApprovalPending, !isOn {
+                Button("Approve", action: onApprove)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("Open macOS Shortcuts approval")
+            } else {
+                Toggle("", isOn: $isOn)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+            }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
@@ -2354,9 +2760,17 @@ struct SetupFeedbackView: View {
 
 struct AppSettingsView: View {
     let connectionState: ConnectionState
+    let currentMeetingFocusEnabled: Bool
+    let meetingFocusApprovalPending: Bool
+    let currentTeamsPresenceEnabled: Bool
+    let microsoftConnectionState: MicrosoftConnectionState
     @State private var draftAlertLeadMinutes: Int
     @State private var draftCalendarNotificationsEnabled: Bool
     @State private var draftMeetingFocusEnabled: Bool
+    @State private var draftTeamsPresenceEnabled: Bool
+    @State private var draftMicrosoftClientID: String
+    @State private var draftMicrosoftTenantID: String
+    @State private var microsoftSetupFeedback: GoogleSetupResult?
     @State private var draftMailBadgeEnabled: Bool
     @State private var draftLaunchAtLoginEnabled: Bool
     @State private var showsResetGoogleSetupConfirmation = false
@@ -2367,7 +2781,14 @@ struct AppSettingsView: View {
     let onOpenGitHub: () -> Void
     let onUpdateAlertLeadMinutes: (Int) -> Void
     let onUpdateCalendarNotifications: (Bool) -> Void
+    let onSendTestCalendarNotification: () -> Void
     let onUpdateMeetingFocus: (Bool) -> Bool
+    let onApproveMeetingFocus: () -> Void
+    let onSaveMicrosoftSetup: (MicrosoftSetupConfig) -> GoogleSetupResult
+    let onConnectMicrosoftTeams: () -> Void
+    let onSignOutMicrosoftTeams: () -> Void
+    let onClearMicrosoftTeamsPresence: () -> Void
+    let onUpdateTeamsPresence: (Bool) -> Bool
     let onUpdateMailBadge: (Bool) -> Void
     let onUpdateLaunchAtLogin: (Bool) -> Void
 
@@ -2376,6 +2797,12 @@ struct AppSettingsView: View {
         initialAlertLeadMinutes: Int,
         initialCalendarNotificationsEnabled: Bool,
         initialMeetingFocusEnabled: Bool,
+        currentMeetingFocusEnabled: Bool,
+        meetingFocusApprovalPending: Bool,
+        initialTeamsPresenceEnabled: Bool,
+        currentTeamsPresenceEnabled: Bool,
+        microsoftConnectionState: MicrosoftConnectionState,
+        initialMicrosoftSetupConfig: MicrosoftSetupConfig,
         initialMailBadgeEnabled: Bool,
         initialLaunchAtLoginEnabled: Bool,
         onDone: @escaping () -> Void,
@@ -2385,16 +2812,30 @@ struct AppSettingsView: View {
         onOpenGitHub: @escaping () -> Void,
         onUpdateAlertLeadMinutes: @escaping (Int) -> Void,
         onUpdateCalendarNotifications: @escaping (Bool) -> Void,
+        onSendTestCalendarNotification: @escaping () -> Void,
         onUpdateMeetingFocus: @escaping (Bool) -> Bool,
+        onApproveMeetingFocus: @escaping () -> Void,
+        onSaveMicrosoftSetup: @escaping (MicrosoftSetupConfig) -> GoogleSetupResult,
+        onConnectMicrosoftTeams: @escaping () -> Void,
+        onSignOutMicrosoftTeams: @escaping () -> Void,
+        onClearMicrosoftTeamsPresence: @escaping () -> Void,
+        onUpdateTeamsPresence: @escaping (Bool) -> Bool,
         onUpdateMailBadge: @escaping (Bool) -> Void,
         onUpdateLaunchAtLogin: @escaping (Bool) -> Void
     ) {
         _draftAlertLeadMinutes = State(initialValue: initialAlertLeadMinutes)
         _draftCalendarNotificationsEnabled = State(initialValue: initialCalendarNotificationsEnabled)
         _draftMeetingFocusEnabled = State(initialValue: initialMeetingFocusEnabled)
+        _draftTeamsPresenceEnabled = State(initialValue: initialTeamsPresenceEnabled)
+        _draftMicrosoftClientID = State(initialValue: initialMicrosoftSetupConfig.clientID)
+        _draftMicrosoftTenantID = State(initialValue: initialMicrosoftSetupConfig.tenantID)
         _draftMailBadgeEnabled = State(initialValue: initialMailBadgeEnabled)
         _draftLaunchAtLoginEnabled = State(initialValue: initialLaunchAtLoginEnabled)
         self.connectionState = connectionState
+        self.currentMeetingFocusEnabled = currentMeetingFocusEnabled
+        self.meetingFocusApprovalPending = meetingFocusApprovalPending
+        self.currentTeamsPresenceEnabled = currentTeamsPresenceEnabled
+        self.microsoftConnectionState = microsoftConnectionState
         self.onDone = onDone
         self.onSignOut = onSignOut
         self.onResetGoogleSetup = onResetGoogleSetup
@@ -2402,7 +2843,14 @@ struct AppSettingsView: View {
         self.onOpenGitHub = onOpenGitHub
         self.onUpdateAlertLeadMinutes = onUpdateAlertLeadMinutes
         self.onUpdateCalendarNotifications = onUpdateCalendarNotifications
+        self.onSendTestCalendarNotification = onSendTestCalendarNotification
         self.onUpdateMeetingFocus = onUpdateMeetingFocus
+        self.onApproveMeetingFocus = onApproveMeetingFocus
+        self.onSaveMicrosoftSetup = onSaveMicrosoftSetup
+        self.onConnectMicrosoftTeams = onConnectMicrosoftTeams
+        self.onSignOutMicrosoftTeams = onSignOutMicrosoftTeams
+        self.onClearMicrosoftTeamsPresence = onClearMicrosoftTeamsPresence
+        self.onUpdateTeamsPresence = onUpdateTeamsPresence
         self.onUpdateMailBadge = onUpdateMailBadge
         self.onUpdateLaunchAtLogin = onUpdateLaunchAtLogin
     }
@@ -2449,11 +2897,22 @@ struct AppSettingsView: View {
                         isOn: calendarNotificationsBinding
                     )
                     AlertLeadSettingRow(selectedMinutes: alertLeadMinutesBinding)
-                    NotificationToggleRow(
+                    SettingsActionRow(
+                        title: "Test alert",
+                        subtitle: "Send a sample macOS meeting notification.",
+                        systemImage: "bell.badge.waveform",
+                        buttonTitle: "Send",
+                        buttonRole: nil,
+                        isDisabled: false,
+                        action: onSendTestCalendarNotification
+                    )
+                    MeetingFocusToggleRow(
                         title: "Do Not Disturb during meetings",
-                        subtitle: "Turns on Do Not Disturb only for accepted meetings. First turn-on may ask for approval.",
+                        subtitle: meetingFocusSubtitle,
                         systemImage: "moon.zzz",
-                        isOn: meetingFocusBinding
+                        isApprovalPending: meetingFocusApprovalPending,
+                        isOn: meetingFocusBinding,
+                        onApprove: onApproveMeetingFocus
                     )
                     SettingsActionRow(
                         title: "Notification settings",
@@ -2463,6 +2922,19 @@ struct AppSettingsView: View {
                         buttonRole: nil,
                         isDisabled: false,
                         action: onOpenNotificationSettings
+                    )
+
+                    SectionTitle("Teams status")
+                    MicrosoftTeamsSettingsCard(
+                        clientID: $draftMicrosoftClientID,
+                        tenantID: $draftMicrosoftTenantID,
+                        connectionState: microsoftConnectionState,
+                        isPresenceEnabled: teamsPresenceBinding,
+                        feedback: microsoftSetupFeedback,
+                        onSave: saveMicrosoftSetup,
+                        onConnect: onConnectMicrosoftTeams,
+                        onSignOut: onSignOutMicrosoftTeams,
+                        onClearPresence: onClearMicrosoftTeamsPresence
                     )
 
                     SectionTitle("Mail")
@@ -2509,6 +2981,12 @@ struct AppSettingsView: View {
         } message: {
             Text("This signs out, revokes the saved Google grant if possible, removes the Client ID and URL scheme from this app, then restarts GWS Menu. You will need Open Setup again.")
         }
+        .onChange(of: currentMeetingFocusEnabled) { _, newValue in
+            draftMeetingFocusEnabled = newValue
+        }
+        .onChange(of: currentTeamsPresenceEnabled) { _, newValue in
+            draftTeamsPresenceEnabled = newValue
+        }
     }
 
     private var alertLeadMinutesBinding: Binding<Int> {
@@ -2538,6 +3016,38 @@ struct AppSettingsView: View {
                 draftMeetingFocusEnabled = onUpdateMeetingFocus(newValue)
             }
         )
+    }
+
+    private var meetingFocusSubtitle: String {
+        if meetingFocusApprovalPending {
+            return "Approval needed. Click Approve once, then Add Shortcut."
+        }
+        return "Turns on Do Not Disturb only for accepted meetings. Existing approval is reused."
+    }
+
+    private var teamsPresenceBinding: Binding<Bool> {
+        Binding(
+            get: { draftTeamsPresenceEnabled },
+            set: { newValue in
+                draftTeamsPresenceEnabled = onUpdateTeamsPresence(newValue)
+            }
+        )
+    }
+
+    private func saveMicrosoftSetup() {
+        let result = onSaveMicrosoftSetup(
+            MicrosoftSetupConfig(clientID: draftMicrosoftClientID, tenantID: draftMicrosoftTenantID)
+        )
+        microsoftSetupFeedback = result
+        guard result.isSuccess,
+              let normalized = try? MicrosoftSetupConfig.normalized(
+                clientID: draftMicrosoftClientID,
+                tenantID: draftMicrosoftTenantID
+              ) else {
+            return
+        }
+        draftMicrosoftClientID = normalized.clientID
+        draftMicrosoftTenantID = normalized.tenantID
     }
 
     private var mailBadgeBinding: Binding<Bool> {
@@ -4526,11 +5036,10 @@ enum GoogleAppBundleSetup {
         var plist = try readInfoPlist(from: infoURL)
 
         plist["GIDClientID"] = config.clientID
-        plist["CFBundleURLTypes"] = [
-            [
-                "CFBundleURLSchemes": [config.reversedClientID]
-            ]
-        ]
+        plist["CFBundleURLTypes"] = urlTypes(
+            preserving: plist["CFBundleURLTypes"] as? [[String: Any]],
+            googleScheme: config.reversedClientID
+        )
 
         try writeInfoPlistAndUpdateSignature(plist, to: infoURL)
         registerCurrentApp()
@@ -4580,6 +5089,29 @@ enum GoogleAppBundleSetup {
             throw GoogleSetupError.cannotReadInfoPlist
         }
         return plist
+    }
+
+    private static func urlTypes(preserving existing: [[String: Any]]?, googleScheme: String) -> [[String: Any]] {
+        var output = existing?.compactMap { urlType -> [String: Any]? in
+            guard let schemes = urlType["CFBundleURLSchemes"] as? [String] else {
+                return urlType
+            }
+            let remainingSchemes = schemes.filter { !$0.hasPrefix("com.googleusercontent.apps.") }
+            guard !remainingSchemes.isEmpty else {
+                return nil
+            }
+            var updated = urlType
+            updated["CFBundleURLSchemes"] = remainingSchemes
+            return updated
+        } ?? []
+
+        output.append(["CFBundleURLSchemes": [googleScheme]])
+        if !output.contains(where: { urlType in
+            (urlType["CFBundleURLSchemes"] as? [String])?.contains(MicrosoftSetupConfig.redirectScheme) == true
+        }) {
+            output.append(["CFBundleURLSchemes": [MicrosoftSetupConfig.redirectScheme]])
+        }
+        return output
     }
 
     private static func writeInfoPlist(_ plist: [String: Any], to infoURL: URL) throws {
@@ -4655,6 +5187,8 @@ enum AppError: LocalizedError {
     case gmailScopeNotGranted
     case notificationPermissionDenied
     case focusShortcutFailed(name: String, detail: String)
+    case microsoftNotSignedIn
+    case keychain(String, OSStatus)
     case api(String)
 
     var errorDescription: String? {
@@ -4673,6 +5207,10 @@ enum AppError: LocalizedError {
             return "macOS notification permission was not granted"
         case .focusShortcutFailed(let name, let detail):
             return "Focus shortcut '\(name)' failed: \(detail)"
+        case .microsoftNotSignedIn:
+            return "Microsoft Teams is not connected"
+        case .keychain(let action, let status):
+            return "Keychain could not \(action) (status \(status))"
         case .api(let message):
             return message
         }

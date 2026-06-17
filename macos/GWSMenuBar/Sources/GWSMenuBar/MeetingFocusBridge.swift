@@ -68,37 +68,10 @@ final class MeetingFocusBridge {
 
     private func currentFocusIsActive() throws -> Bool {
         let output = try runShortcuts(arguments: ["run", Self.helperShortcutName], standardInput: "status")
-        if let status = Self.parseFocusStatus(output) {
+        if let status = FocusStatusParser.parse(output) {
             return status
         }
         throw AppError.focusShortcutFailed(name: Self.helperShortcutName, detail: "could not read current Do Not Disturb status")
-    }
-
-    private static func parseFocusStatus(_ output: String) -> Bool? {
-        let normalized = output
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        if normalized.isEmpty {
-            return nil
-        }
-        if ["true", "on", "enabled", "active", "1", "yes"].contains(normalized) {
-            return true
-        }
-        if ["false", "off", "disabled", "inactive", "0", "no"].contains(normalized) {
-            return false
-        }
-        let tokens = Set(
-            normalized.split { !$0.isLetter && !$0.isNumber }
-                .map(String.init)
-        )
-        let activeTokens: Set<String> = ["true", "on", "enabled", "active", "1", "yes"]
-        let inactiveTokens: Set<String> = ["false", "off", "disabled", "inactive", "0", "no"]
-        let hasActiveToken = !tokens.isDisjoint(with: activeTokens)
-        let hasInactiveToken = !tokens.isDisjoint(with: inactiveTokens)
-        if hasActiveToken != hasInactiveToken {
-            return hasActiveToken
-        }
-        return nil
     }
 
     private func clearManagedFocusState(_ defaults: UserDefaults) {

@@ -10,8 +10,9 @@ Native macOS menu bar app for Google Workspace shortcuts, read-only Google Calen
 - Shows your upcoming Google Calendar events and the current or next meeting in the menu bar.
 - Sends optional macOS desktop alerts before meetings.
 - Can turn on Do Not Disturb during accepted meetings.
+- Can set Microsoft Teams status to Busy during accepted meetings.
 - Shows an optional Gmail Inbox unread badge, capped as `99+`.
-- Stores Google sign-in credentials in Keychain.
+- Stores Google and Microsoft sign-in credentials in Keychain.
 
 ## Quick Start
 
@@ -78,7 +79,7 @@ Do not use **Web application** or **Desktop app** credentials. If Google shows a
 After sign-in, GWS Menu shows a small **Finish setup** card for optional features:
 
 - **Meeting alerts**: asks for macOS notification permission only when you enable it.
-- **Do Not Disturb during meetings**: asks for one-time macOS approval the first time you turn it on.
+- **Do Not Disturb during meetings**: reuses existing approval, or shows an **Approve** button for one-time macOS approval.
 - **Gmail badge**: asks for Gmail unread-count permission only when you enable it.
 - **Open at login**: adds GWS Menu to macOS Login Items.
 
@@ -86,7 +87,8 @@ After sign-in, GWS Menu shows a small **Finish setup** card for optional feature
 
 Open Settings from the gear button in GWS Menu. Changes save automatically.
 
-- **Calendar**: choose desktop alert timing and optional Do Not Disturb during meetings.
+- **Calendar**: choose desktop alert timing, send a test alert, and optionally enable Do Not Disturb during meetings.
+- **Teams status**: connect Microsoft once and optionally set Teams Busy during accepted meetings.
 - **Mail**: enable or disable the Gmail unread badge.
 - **General**: enable Open at login or open the GitHub repository.
 - **Account**: sign out of Google.
@@ -100,11 +102,25 @@ GWS Menu can turn on macOS Do Not Disturb during accepted meetings.
 
 1. Open **Settings -> Calendar**.
 2. Turn on **Do Not Disturb during meetings**.
-3. If macOS opens an approval screen, click **Add Shortcut** once.
-4. Return to GWS Menu and turn the setting on again.
+3. If an **Approve** button appears, click it, then click **Add Shortcut** once in macOS.
+4. Return to GWS Menu. The setting turns on automatically after approval.
 
 Only current accepted meetings with a meeting link or guests trigger Focus. Tentative, unanswered, and declined meetings only show their status color in Upcoming.
 If Do Not Disturb was already on before a meeting starts, GWS Menu leaves it on after the meeting ends.
+
+### Microsoft Teams Busy During Meetings
+
+GWS Menu can set your Teams presence to `Busy / InAConferenceCall` during accepted Google Calendar meetings.
+
+1. Open **Settings -> Teams status**.
+2. In Microsoft Entra admin center, create an app registration for a public/native client.
+3. Add this redirect URI: `gwsmenu://microsoft-auth`.
+4. Add delegated Microsoft Graph permissions: `User.Read` and `Presence.ReadWrite`.
+5. Copy the **Application (client) ID** into GWS Menu, keep tenant as `organizations` unless your company requires a tenant ID, then click **Save Setup**.
+6. Click **Connect** once and approve Microsoft sign-in.
+7. Turn on **Microsoft Teams Busy**.
+
+GWS Menu uses Microsoft Graph presence sessions, not preferred presence. It clears only its own session when the meeting ends or the setting is turned off. Personal Microsoft accounts are not supported by Microsoft Graph Presence API, and some company tenants may require admin approval.
 
 ## Updating
 
@@ -121,11 +137,13 @@ The installer closes any running `GWSMenu` process, replaces `~/Applications/GWS
 
 - Calendar access uses `https://www.googleapis.com/auth/calendar.readonly`.
 - The Gmail badge uses `https://www.googleapis.com/auth/gmail.labels` only when enabled.
+- Teams Busy uses Microsoft Graph delegated `User.Read` and `Presence.ReadWrite` only when enabled.
 - GWS Menu does not read Gmail sender, subject, body, or attachments.
 - GWS Menu does not send desktop mail alerts.
 - Do Not Disturb during meetings uses macOS Do Not Disturb; your Focus settings decide which apps or people are allowed through.
 - GWS Menu does not turn off a Do Not Disturb state that was already active before it touched it.
 - Google auth is handled by Google Sign-In and Keychain.
+- Microsoft auth uses OAuth code flow with PKCE. The Microsoft refresh token is stored in Keychain.
 - Google product icons are downloaded locally and ignored by Git.
 
 ## Troubleshooting
@@ -133,7 +151,10 @@ The installer closes any running `GWSMenu` process, replaces `~/Applications/GWS
 - **`client_secret` error**: delete that OAuth client and create an `iOS` OAuth client instead.
 - **Sign-in opens and immediately closes**: open **Setup**, save the current Client ID once, then sign in again.
 - **Meeting alerts do not appear**: allow GWS Menu in **System Settings -> Notifications**, then enable Meeting alerts again.
-- **Do Not Disturb during meetings asks for approval**: click **Add Shortcut** once when macOS opens the approval screen, then turn the setting on again.
+- **Need to verify alerts**: open **Settings -> Calendar -> Test alert** and click **Send**.
+- **Do Not Disturb during meetings asks for approval**: click **Approve**, then click **Add Shortcut** once in macOS. GWS Menu turns the setting on automatically after approval.
+- **Teams Connect fails with admin approval**: your Microsoft tenant blocks user consent for Presence.ReadWrite. Ask a Microsoft admin to approve the app registration.
+- **Teams redirect URI mismatch**: add `gwsmenu://microsoft-auth` to the Microsoft app registration.
 - **Old behavior after updating**: rerun the installer command; it restarts the menu app after replacing it.
 - **Need icons only**:
 

@@ -65,6 +65,9 @@ struct GWSMenuCoreBehaviorTest {
         let accepted = StubEvent(id: "accepted", start: date("2026-06-11T09:00:00Z"), end: date("2026-06-11T10:00:00Z"), isAllDay: false, hasMeetingSignal: true, selfResponseStatus: .accepted)
         let needsAction = StubEvent(id: "needs", start: date("2026-06-11T09:00:00Z"), end: date("2026-06-11T10:00:00Z"), isAllDay: false, hasMeetingSignal: true, selfResponseStatus: .needsAction)
         let declined = StubEvent(id: "declined", start: date("2026-06-11T09:00:00Z"), end: date("2026-06-11T10:00:00Z"), isAllDay: false, hasMeetingSignal: true, selfResponseStatus: .declined)
+        let allDay = StubEvent(id: "all-day", start: date("2026-06-11T00:00:00Z"), end: date("2026-06-12T00:00:00Z"), isAllDay: true, hasMeetingSignal: true, selfResponseStatus: .accepted)
+        let future = StubEvent(id: "future", start: date("2026-06-11T11:00:00Z"), end: date("2026-06-11T12:00:00Z"), isAllDay: false, hasMeetingSignal: true, selfResponseStatus: .accepted)
+        let noMeetingSignal = StubEvent(id: "focus-time", start: date("2026-06-11T09:00:00Z"), end: date("2026-06-11T10:00:00Z"), isAllDay: false, hasMeetingSignal: false, selfResponseStatus: .accepted)
         expectEqual(
             MeetingFocusPolicy.desiredState(events: [needsAction, declined], now: focusNow, isEnabled: true),
             .inactive,
@@ -75,11 +78,93 @@ struct GWSMenuCoreBehaviorTest {
             .active(until: accepted.end, eventID: "accepted"),
             "accepted current meeting enables DND until meeting end"
         )
+        expectEqual(
+            MeetingNotificationPolicy.shouldSuppressNotifications(events: [needsAction, accepted, declined], at: focusNow),
+            true,
+            "accepted current meeting suppresses GWS Menu notifications"
+        )
+        expectEqual(
+            MeetingNotificationPolicy.shouldSuppressNotifications(events: [needsAction, declined], at: focusNow),
+            false,
+            "needs-action and declined meetings do not suppress GWS Menu notifications"
+        )
+        expectEqual(
+            MeetingNotificationPolicy.shouldSuppressNotifications(events: [allDay, future, noMeetingSignal], at: focusNow),
+            false,
+            "all-day, future, and non-meeting focus blocks do not suppress GWS Menu notifications"
+        )
+        expectEqual(
+            MeetingNotificationPolicy.shouldSuppressNotifications(events: [accepted], at: accepted.start),
+            true,
+            "suppression includes the meeting start instant"
+        )
+        expectEqual(
+            MeetingNotificationPolicy.shouldSuppressNotifications(events: [accepted], at: accepted.end),
+            false,
+            "suppression stops at the meeting end instant"
+        )
 
         expectEqual(CalendarSelfResponseStatus.accepted.indicatorSemanticColor, .green, "accepted indicator is green")
         expectEqual(CalendarSelfResponseStatus.tentative.indicatorSemanticColor, .orange, "tentative indicator is orange")
         expectEqual(CalendarSelfResponseStatus.needsAction.indicatorSemanticColor, .gray, "needs-action indicator is gray")
         expectEqual(CalendarSelfResponseStatus.declined.indicatorSemanticColor, .red, "declined indicator is red")
+
+        expectEqual(FocusStatusParser.parse(""), false, "empty Korean Shortcuts status means DND is off")
+        expectEqual(FocusStatusParser.parse("방해금지 모드"), true, "Korean DND status means DND is on")
+        expectEqual(FocusStatusParser.parse("off"), false, "English off status means DND is off")
+        expectEqual(FocusStatusParser.parse("enabled"), true, "English enabled status means DND is on")
+
+        let remaining = date("2026-06-11T09:04:15Z")
+        let shortPresence = TeamsPresencePolicy.setPresenceRequest(
+            sessionID: "11111111-2222-3333-4444-555555555555",
+            until: date("2026-06-11T09:06:00Z"),
+            now: remaining
+        )
+        expectEqual(shortPresence.availability, "Busy", "Teams presence uses Busy availability")
+        expectEqual(shortPresence.activity, "InAConferenceCall", "Teams presence uses conference call activity")
+        expectEqual(shortPresence.expirationDuration, "PT5M", "Teams presence clamps short meetings to Graph minimum")
+        let longPresence = TeamsPresencePolicy.setPresenceRequest(
+            sessionID: "11111111-2222-3333-4444-555555555555",
+            until: date("2026-06-11T15:30:00Z"),
+            now: focusNow
+        )
+        expectEqual(longPresence.expirationDuration, "PT4H", "Teams presence clamps long meetings to Graph maximum")
+        expectEqual(
+            TeamsPresencePolicy.desiredState(events: [needsAction, accepted, declined], now: focusNow, isEnabled: true),
+            .active(until: accepted.end, eventID: "accepted"),
+            "accepted current meeting enables Teams Busy"
+        )
+        expectEqual(
+            TeamsPresencePolicy.desiredState(events: [needsAction, declined, allDay, noMeetingSignal], now: focusNow, isEnabled: true),
+            .inactive,
+            "Teams Busy ignores declined, unanswered, all-day, and non-meeting focus blocks"
+        )
+        let managedSession = TeamsPresencePolicy.managedSession(
+            eventID: "accepted",
+            request: longPresence,
+            userID: "graph-user-original"
+        )
+        expectEqual(managedSession.sessionID, "11111111-2222-3333-4444-555555555555", "managed session keeps the app session ID used for setPresence")
+        expectEqual(managedSession.userID, "graph-user-original", "managed session keeps the Microsoft Graph user ID used for setPresence")
+        expectEqual(
+            TeamsPresencePolicy.shouldRefreshManagedPresence(eventID: "accepted", managedSession: managedSession, now: focusNow),
+            false,
+            "managed presence is not refreshed while the same meeting session is still fresh"
+        )
+        expectEqual(
+            TeamsPresencePolicy.shouldRefreshManagedPresence(
+                eventID: "accepted",
+                managedSession: managedSession,
+                now: date("2026-06-11T15:26:00Z")
+            ),
+            true,
+            "managed presence refreshes before Graph expiration"
+        )
+        expectEqual(
+            TeamsPresencePolicy.shouldRefreshManagedPresence(eventID: "different", managedSession: managedSession, now: focusNow),
+            true,
+            "managed presence refreshes when the active meeting changes"
+        )
 
         print("PASS: GWSMenuCore behavior")
     }

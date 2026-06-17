@@ -23,6 +23,7 @@ client_secret*.json
 
 # Runtime and editor noise
 .omo/
+.ulw/
 *.log
 *.tmp
 *.swp

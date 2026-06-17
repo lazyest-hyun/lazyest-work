@@ -59,6 +59,12 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
   <string>$GOOGLE_REVERSED_CLIENT_ID</string>
       </array>
     </dict>
+    <dict>
+      <key>CFBundleURLSchemes</key>
+      <array>
+  <string>gwsmenu</string>
+      </array>
+    </dict>
   </array>
   <key>LSMinimumSystemVersion</key>
   <string>14.0</string>
