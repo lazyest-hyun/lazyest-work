@@ -11,6 +11,9 @@ APP_ICON="$PACKAGE_DIR/Assets/AppIcon.icns"
 BUNDLE_ID="${GWS_BUNDLE_ID:-io.github.gwsmenu.app}"
 GOOGLE_CLIENT_ID="${GWS_GOOGLE_CLIENT_ID:-YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com}"
 GOOGLE_REVERSED_CLIENT_ID="${GWS_GOOGLE_REVERSED_CLIENT_ID:-com.googleusercontent.apps.YOUR_GOOGLE_CLIENT_ID}"
+MICROSOFT_CLIENT_ID="${GWS_MICROSOFT_CLIENT_ID:-}"
+MICROSOFT_TENANT_ID="${GWS_MICROSOFT_TENANT_ID:-organizations}"
+MICROSOFT_REDIRECT_SCHEME="msauth.$BUNDLE_ID"
 CODE_SIGN_IDENTITY="${GWS_CODESIGN_IDENTITY:-}"
 TEAM_ID="${GWS_TEAM_ID:-}"
 
@@ -27,6 +30,21 @@ for bundle in "$PACKAGE_DIR"/.build/*-apple-macosx/release/*.bundle; do
   [[ -e "$bundle" ]] || continue
   cp -R "$bundle" "$RESOURCES_DIR/"
 done
+
+MICROSOFT_PLIST_KEYS=""
+MICROSOFT_URL_TYPE=""
+if [[ -n "$MICROSOFT_CLIENT_ID" ]]; then
+  MICROSOFT_PLIST_KEYS="  <key>GWSMicrosoftClientID</key>
+  <string>$MICROSOFT_CLIENT_ID</string>
+  <key>GWSMicrosoftTenantID</key>
+  <string>$MICROSOFT_TENANT_ID</string>"
+  MICROSOFT_URL_TYPE="    <dict>
+      <key>CFBundleURLSchemes</key>
+      <array>
+        <string>$MICROSOFT_REDIRECT_SCHEME</string>
+      </array>
+    </dict>"
+fi
 
 cat > "$CONTENTS_DIR/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -51,6 +69,7 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
   <string>1</string>
   <key>GIDClientID</key>
   <string>$GOOGLE_CLIENT_ID</string>
+$MICROSOFT_PLIST_KEYS
   <key>CFBundleURLTypes</key>
   <array>
     <dict>
@@ -59,12 +78,7 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
   <string>$GOOGLE_REVERSED_CLIENT_ID</string>
       </array>
     </dict>
-    <dict>
-      <key>CFBundleURLSchemes</key>
-      <array>
-  <string>gwsmenu</string>
-      </array>
-    </dict>
+$MICROSOFT_URL_TYPE
   </array>
   <key>LSMinimumSystemVersion</key>
   <string>14.0</string>

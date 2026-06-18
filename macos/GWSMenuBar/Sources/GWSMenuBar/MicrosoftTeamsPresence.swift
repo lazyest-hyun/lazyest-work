@@ -7,101 +7,39 @@ import Security
 
 struct MicrosoftSetupConfig: Equatable {
     static let defaultTenantID = "organizations"
-    static let redirectScheme = "gwsmenu"
-    static let redirectURI = "gwsmenu://microsoft-auth"
+    static let defaultBundleID = "io.github.gwsmenu.app"
+
+    static var redirectScheme: String {
+        redirectScheme(for: Bundle.main.bundleIdentifier ?? defaultBundleID)
+    }
+
+    static var redirectURI: String {
+        "\(redirectScheme)://auth"
+    }
+
+    static func redirectScheme(for bundleID: String) -> String {
+        "msauth.\(bundleID)"
+    }
 
     var clientID: String
     var tenantID: String
 
     var isComplete: Bool {
-        clientID.nilIfBlank != nil && tenantID.nilIfBlank != nil
+        (try? Self.normalized(clientID: clientID, tenantID: tenantID)) != nil
     }
 
     static func normalized(clientID: String, tenantID: String) throws -> MicrosoftSetupConfig {
-        if containsClientSecret(in: clientID) || containsClientSecret(in: tenantID) {
-            throw MicrosoftSetupError.clientSecretNotSupported
-        }
-
-        let normalizedClientID = extractedClientID(from: clientID) ?? clientID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard isValidClientID(normalizedClientID) else {
-            throw MicrosoftSetupError.invalidClientID
+        let normalizedClientID = clientID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard UUID(uuidString: normalizedClientID) != nil else {
+            throw MicrosoftSetupError.missingBundleConfig
         }
 
         let normalizedTenantID = tenantID.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? defaultTenantID
         guard isValidTenantID(normalizedTenantID) else {
-            throw MicrosoftSetupError.invalidTenantID
+            throw MicrosoftSetupError.missingBundleConfig
         }
 
         return MicrosoftSetupConfig(clientID: normalizedClientID, tenantID: normalizedTenantID)
-    }
-
-    static func containsClientSecret(in input: String) -> Bool {
-        input.range(of: "client_secret", options: .caseInsensitive) != nil ||
-            input.range(of: "client secret", options: .caseInsensitive) != nil ||
-            input.range(of: "secretText", options: .caseInsensitive) != nil
-    }
-
-    static func extractedClientID(from input: String) -> String? {
-        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        if isValidClientID(trimmed) {
-            return trimmed
-        }
-
-        if let data = trimmed.data(using: .utf8),
-           let json = try? JSONSerialization.jsonObject(with: data),
-           let value = firstClientIDValue(in: json) {
-            return value
-        }
-
-        return firstClientIDMatch(in: trimmed)
-    }
-
-    private static func firstClientIDValue(in object: Any) -> String? {
-        if let string = object as? String, isValidClientID(string) {
-            return string.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-
-        if let dictionary = object as? [String: Any] {
-            for key in ["client_id", "clientId", "appId", "applicationId"] {
-                if let value = dictionary[key] as? String, isValidClientID(value) {
-                    return value.trimmingCharacters(in: .whitespacesAndNewlines)
-                }
-            }
-            for value in dictionary.values {
-                if let found = firstClientIDValue(in: value) {
-                    return found
-                }
-            }
-        }
-
-        if let array = object as? [Any] {
-            for value in array {
-                if let found = firstClientIDValue(in: value) {
-                    return found
-                }
-            }
-        }
-
-        return nil
-    }
-
-    private static func firstClientIDMatch(in text: String) -> String? {
-        let pattern = #"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else {
-            return nil
-        }
-        let range = NSRange(text.startIndex..<text.endIndex, in: text)
-        guard let match = regex.firstMatch(in: text, range: range),
-              let matchRange = Range(match.range, in: text) else {
-            return nil
-        }
-        let value = String(text[matchRange])
-        return isValidClientID(value) ? value : nil
-    }
-
-    private static func isValidClientID(_ value: String) -> Bool {
-        UUID(uuidString: value.trimmingCharacters(in: .whitespacesAndNewlines)) != nil
     }
 
     private static func isValidTenantID(_ value: String) -> Bool {
@@ -118,41 +56,19 @@ struct MicrosoftSetupConfig: Equatable {
 }
 
 enum MicrosoftSetupError: LocalizedError {
-    case invalidClientID
-    case invalidTenantID
-    case clientSecretNotSupported
+    case missingBundleConfig
 
     var errorDescription: String? {
-        switch self {
-        case .invalidClientID:
-            return "Paste the Microsoft Entra Application (client) ID. It should look like a UUID."
-        case .invalidTenantID:
-            return "Use organizations, a tenant ID, or a tenant domain."
-        case .clientSecretNotSupported:
-            return "GWS Menu is a public native app. Do not paste a Microsoft client secret."
-        }
+        "Teams status is not configured in this build."
     }
 }
 
 enum MicrosoftSetupSettings {
-    private static let clientIDKey = "microsoftClientID"
-    private static let tenantIDKey = "microsoftTenantID"
-
     static func load() -> MicrosoftSetupConfig {
         MicrosoftSetupConfig(
-            clientID: UserDefaults.standard.string(forKey: clientIDKey) ?? "",
-            tenantID: UserDefaults.standard.string(forKey: tenantIDKey) ?? MicrosoftSetupConfig.defaultTenantID
+            clientID: Bundle.main.microsoftClientID ?? "",
+            tenantID: Bundle.main.microsoftTenantID ?? MicrosoftSetupConfig.defaultTenantID
         )
-    }
-
-    static func save(_ config: MicrosoftSetupConfig) {
-        UserDefaults.standard.set(config.clientID, forKey: clientIDKey)
-        UserDefaults.standard.set(config.tenantID, forKey: tenantIDKey)
-    }
-
-    static func reset() {
-        UserDefaults.standard.removeObject(forKey: clientIDKey)
-        UserDefaults.standard.removeObject(forKey: tenantIDKey)
     }
 }
 
@@ -183,7 +99,7 @@ enum MicrosoftConnectionState: Equatable {
     var accountLine: String {
         switch self {
         case .missingSetup:
-            return "Microsoft setup needed"
+            return "Not configured in this build"
         case .signedOut:
             return "Not connected"
         case .connected(let account):
@@ -296,7 +212,7 @@ final class MicrosoftGraphAuthClient: NSObject, ASWebAuthenticationPresentationC
     }
 
     func connectionState() -> MicrosoftConnectionState {
-        guard config.isComplete else {
+        guard (try? MicrosoftSetupConfig.normalized(clientID: config.clientID, tenantID: config.tenantID)) != nil else {
             return .missingSetup
         }
         guard let tokenSet = try? tokenStore.load() else {
@@ -306,15 +222,13 @@ final class MicrosoftGraphAuthClient: NSObject, ASWebAuthenticationPresentationC
     }
 
     func signIn(config: MicrosoftSetupConfig) async throws {
-        configure(config)
-        guard config.isComplete else {
-            throw MicrosoftSetupError.invalidClientID
-        }
+        let normalized = try MicrosoftSetupConfig.normalized(clientID: config.clientID, tenantID: config.tenantID)
+        configure(normalized)
 
         let verifier = PKCE.randomVerifier()
         let state = UUID().uuidString
-        let code = try await authorizationCode(verifier: verifier, state: state, config: config)
-        var tokenSet = try await exchangeCode(code, verifier: verifier, config: config)
+        let code = try await authorizationCode(verifier: verifier, state: state, config: normalized)
+        var tokenSet = try await exchangeCode(code, verifier: verifier, config: normalized)
         let profile = try await fetchProfile(accessToken: tokenSet.accessToken)
         tokenSet.accountName = profile.userPrincipalName ?? profile.displayName
         tokenSet.userID = profile.id
@@ -322,9 +236,7 @@ final class MicrosoftGraphAuthClient: NSObject, ASWebAuthenticationPresentationC
     }
 
     func accessToken() async throws -> String {
-        guard config.isComplete else {
-            throw MicrosoftSetupError.invalidClientID
-        }
+        let normalized = try MicrosoftSetupConfig.normalized(clientID: config.clientID, tenantID: config.tenantID)
         guard var tokenSet = try tokenStore.load() else {
             throw AppError.microsoftNotSignedIn
         }
@@ -332,7 +244,7 @@ final class MicrosoftGraphAuthClient: NSObject, ASWebAuthenticationPresentationC
             return tokenSet.accessToken
         }
 
-        tokenSet = try await refresh(tokenSet, config: config)
+        tokenSet = try await refresh(tokenSet, config: normalized)
         try tokenStore.save(tokenSet)
         return tokenSet.accessToken
     }
@@ -461,7 +373,7 @@ final class MicrosoftGraphAuthClient: NSObject, ASWebAuthenticationPresentationC
             tenantID: config.tenantID
         )
         guard let refreshToken = response.refreshToken?.nilIfBlank else {
-            throw AppError.api("Microsoft did not return a refresh token. Check that offline_access is allowed.")
+            throw AppError.api("Microsoft did not return a refresh token.")
         }
         return MicrosoftTokenSet(
             accessToken: response.accessToken,
@@ -592,7 +504,11 @@ final class MicrosoftTeamsPresenceService {
             return
         }
 
-        let config = MicrosoftSetupSettings.load()
+        let savedConfig = MicrosoftSetupSettings.load()
+        let config = try MicrosoftSetupConfig.normalized(
+            clientID: savedConfig.clientID,
+            tenantID: savedConfig.tenantID
+        )
         let request = TeamsPresencePolicy.setPresenceRequest(sessionID: config.clientID, until: end, now: now)
         let accessToken = try await authClient.accessToken()
         let userID = try await authClient.graphUserID()
@@ -650,6 +566,25 @@ final class MicrosoftTeamsPresenceService {
             return
         }
         defaults.set(data, forKey: managedSessionKey)
+    }
+}
+
+extension Bundle {
+    var microsoftClientID: String? {
+        guard let value = object(forInfoDictionaryKey: "GWSMicrosoftClientID") as? String,
+              let trimmed = value.nilIfBlank,
+              !trimmed.contains("YOUR_MICROSOFT_CLIENT_ID") else {
+            return nil
+        }
+        return trimmed
+    }
+
+    var microsoftTenantID: String? {
+        guard let value = object(forInfoDictionaryKey: "GWSMicrosoftTenantID") as? String,
+              let trimmed = value.nilIfBlank else {
+            return nil
+        }
+        return trimmed
     }
 }
 

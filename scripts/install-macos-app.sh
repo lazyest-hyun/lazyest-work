@@ -21,6 +21,8 @@ Environment variables accepted by scripts/build-macos-app.sh are forwarded:
   GWS_BUNDLE_ID
   GWS_GOOGLE_CLIENT_ID
   GWS_GOOGLE_REVERSED_CLIENT_ID
+  GWS_MICROSOFT_CLIENT_ID
+  GWS_MICROSOFT_TENANT_ID
   GWS_CODESIGN_IDENTITY
   GWS_TEAM_ID
   GWS_KEYCHAIN_ACCESS_GROUP
@@ -98,6 +100,20 @@ if [[ -z "${GWS_GOOGLE_REVERSED_CLIENT_ID:-}" ]]; then
   EXISTING_REVERSED_CLIENT_ID="$(read_google_url_scheme)"
   if [[ -n "$EXISTING_REVERSED_CLIENT_ID" ]]; then
     export GWS_GOOGLE_REVERSED_CLIENT_ID="$EXISTING_REVERSED_CLIENT_ID"
+  fi
+fi
+
+if [[ -z "${GWS_MICROSOFT_CLIENT_ID:-}" ]]; then
+  EXISTING_MICROSOFT_CLIENT_ID="$(read_info_value "GWSMicrosoftClientID")"
+  if [[ -n "$EXISTING_MICROSOFT_CLIENT_ID" && "$EXISTING_MICROSOFT_CLIENT_ID" != *YOUR_MICROSOFT_CLIENT_ID* ]]; then
+    export GWS_MICROSOFT_CLIENT_ID="$EXISTING_MICROSOFT_CLIENT_ID"
+  fi
+fi
+
+if [[ -z "${GWS_MICROSOFT_TENANT_ID:-}" ]]; then
+  EXISTING_MICROSOFT_TENANT_ID="$(read_info_value "GWSMicrosoftTenantID")"
+  if [[ -n "$EXISTING_MICROSOFT_TENANT_ID" ]]; then
+    export GWS_MICROSOFT_TENANT_ID="$EXISTING_MICROSOFT_TENANT_ID"
   fi
 fi
 BUILD_LOG="$(mktemp -t gws-menu-build.XXXXXX)"

@@ -275,9 +275,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 onSendTestCalendarNotification: { [weak self] in self?.sendTestCalendarNotificationFromSettings() },
                 onUpdateMeetingFocus: { [weak self] isEnabled in self?.updateMeetingFocusEnabled(isEnabled) ?? false },
                 onApproveMeetingFocus: { [weak self] in self?.requestMeetingFocusApproval() },
-                onSaveMicrosoftSetup: { [weak self] config in
-                    self?.saveMicrosoftSetup(config) ?? .failure("App is not ready to save Microsoft setup.")
-                },
                 onConnectMicrosoftTeams: { [weak self] in self?.connectMicrosoftTeams() },
                 onSignOutMicrosoftTeams: { [weak self] in self?.signOutMicrosoftTeams() },
                 onClearMicrosoftTeamsPresence: { [weak self] in self?.clearMicrosoftTeamsPresenceFromSettings() },
@@ -748,36 +745,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     private func refreshMicrosoftConnectionState() {
+        model.teamsSetupConfig = MicrosoftSetupSettings.load()
         microsoftAuthClient.configure(model.teamsSetupConfig)
         model.teamsConnectionState = microsoftAuthClient.connectionState()
-    }
-
-    private func saveMicrosoftSetup(_ config: MicrosoftSetupConfig) -> GoogleSetupResult {
-        do {
-            let normalized = try MicrosoftSetupConfig.normalized(clientID: config.clientID, tenantID: config.tenantID)
-            model.teamsSetupConfig = normalized
-            MicrosoftSetupSettings.save(normalized)
-            microsoftAuthClient.configure(normalized)
-            refreshMicrosoftConnectionState()
-            refreshUI()
-            return .success("Microsoft setup saved. Connect once, then GWS Menu keeps the token in Keychain.")
-        } catch {
-            return .failure(error.localizedDescription)
-        }
     }
 
     private func connectMicrosoftTeams() {
         guard !model.isBusy else { return }
         do {
-            let normalized = try MicrosoftSetupConfig.normalized(
+            let config = try MicrosoftSetupConfig.normalized(
                 clientID: model.teamsSetupConfig.clientID,
                 tenantID: model.teamsSetupConfig.tenantID
             )
-            model.teamsSetupConfig = normalized
-            MicrosoftSetupSettings.save(normalized)
-            microsoftAuthClient.configure(normalized)
+            model.teamsSetupConfig = config
+            microsoftAuthClient.configure(config)
         } catch {
-            model.lastError = error.localizedDescription
+            model.lastError = userFacingError(error)
             model.lastErrorRecovery = nil
             refreshUI()
             return
@@ -853,14 +836,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         refreshMicrosoftConnectionState()
         guard model.teamsSetupConfig.isComplete else {
             model.teamsPresenceEnabled = false
-            model.lastError = "Save Microsoft setup before enabling Teams Busy."
+            model.lastError = "Teams status is not configured in this build."
             model.lastErrorRecovery = nil
             refreshUI()
             return false
         }
         guard model.teamsConnectionState.isConnected else {
             model.teamsPresenceEnabled = false
-            model.lastError = "Connect Microsoft Teams once before enabling Teams Busy."
+            model.lastError = "Connect Microsoft once before enabling Teams Busy."
             model.lastErrorRecovery = nil
             refreshUI()
             return false
@@ -1267,23 +1250,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         if lowercased.contains("redirect_uri_mismatch") || lowercased.contains("url scheme") {
             return "Google could not return to GWS Menu. Open Setup and save the generated URL scheme, then try signing in again."
         }
-        if lowercased.contains("microsoft") || lowercased.contains("entra") || lowercased.contains("graph") {
+        if lowercased.contains("microsoft") || lowercased.contains("graph") || lowercased.contains("teams") ||
+            lowercased.contains("presencereadwrite") || lowercased.contains("presence.readwrite") {
             if lowercased.contains("keychain") {
-                return "Microsoft Teams status could not read or save credentials in Keychain. Try Connect again from Settings."
+                return "Teams status could not read or save credentials in Keychain. Try Connect Microsoft again."
             }
             if lowercased.contains("aadsts65001") || lowercased.contains("admin") || lowercased.contains("consent") {
-                return "Microsoft Teams status needs Graph Presence permission. Your Microsoft tenant may require admin approval."
+                return "Teams status needs permission approval from your Microsoft account or organization."
             }
-            if lowercased.contains("invalid_client") {
-                return "Microsoft Client ID is not valid for this app. Check the Application client ID in Settings."
+            if lowercased.contains("not configured") {
+                return "Teams status is not available in this build."
             }
-            if lowercased.contains("redirect") || lowercased.contains("reply url") {
-                return "Microsoft redirect URI does not match. Add gwsmenu://microsoft-auth to the app registration."
+            if lowercased.contains("not connected") || lowercased.contains("sign-in") || lowercased.contains("sign in") {
+                return "Connect Microsoft once before enabling Teams Busy."
             }
-            if lowercased.contains("presence") || lowercased.contains("presencereadwrite") {
-                return "Microsoft Teams status needs Presence.ReadWrite permission. Check API permissions and consent."
-            }
-            return message
+            return "Teams status could not be updated. Try Connect Microsoft again."
         }
         if lowercased.contains("keychain") {
             return "Google Sign-In could not read or save credentials. Open Setup, save the current Client ID once, then try Sign in again."
@@ -1367,7 +1348,6 @@ struct GWSMenuPopover: View {
     let onSendTestCalendarNotification: () -> Void
     let onUpdateMeetingFocus: (Bool) -> Bool
     let onApproveMeetingFocus: () -> Void
-    let onSaveMicrosoftSetup: (MicrosoftSetupConfig) -> GoogleSetupResult
     let onConnectMicrosoftTeams: () -> Void
     let onSignOutMicrosoftTeams: () -> Void
     let onClearMicrosoftTeamsPresence: () -> Void
@@ -1392,7 +1372,7 @@ struct GWSMenuPopover: View {
                     initialTeamsPresenceEnabled: model.teamsPresenceEnabled,
                     currentTeamsPresenceEnabled: model.teamsPresenceEnabled,
                     microsoftConnectionState: model.teamsConnectionState,
-                    initialMicrosoftSetupConfig: model.teamsSetupConfig,
+                    microsoftSetupConfig: model.teamsSetupConfig,
                     initialMailBadgeEnabled: model.mailBadgeEnabled,
                     initialLaunchAtLoginEnabled: model.launchAtLoginEnabled,
                     onDone: { screen = .home },
@@ -1405,7 +1385,6 @@ struct GWSMenuPopover: View {
                     onSendTestCalendarNotification: onSendTestCalendarNotification,
                     onUpdateMeetingFocus: onUpdateMeetingFocus,
                     onApproveMeetingFocus: onApproveMeetingFocus,
-                    onSaveMicrosoftSetup: onSaveMicrosoftSetup,
                     onConnectMicrosoftTeams: onConnectMicrosoftTeams,
                     onSignOutMicrosoftTeams: onSignOutMicrosoftTeams,
                     onClearMicrosoftTeamsPresence: onClearMicrosoftTeamsPresence,
@@ -2764,13 +2743,11 @@ struct AppSettingsView: View {
     let meetingFocusApprovalPending: Bool
     let currentTeamsPresenceEnabled: Bool
     let microsoftConnectionState: MicrosoftConnectionState
+    let microsoftSetupConfig: MicrosoftSetupConfig
     @State private var draftAlertLeadMinutes: Int
     @State private var draftCalendarNotificationsEnabled: Bool
     @State private var draftMeetingFocusEnabled: Bool
     @State private var draftTeamsPresenceEnabled: Bool
-    @State private var draftMicrosoftClientID: String
-    @State private var draftMicrosoftTenantID: String
-    @State private var microsoftSetupFeedback: GoogleSetupResult?
     @State private var draftMailBadgeEnabled: Bool
     @State private var draftLaunchAtLoginEnabled: Bool
     @State private var showsResetGoogleSetupConfirmation = false
@@ -2784,7 +2761,6 @@ struct AppSettingsView: View {
     let onSendTestCalendarNotification: () -> Void
     let onUpdateMeetingFocus: (Bool) -> Bool
     let onApproveMeetingFocus: () -> Void
-    let onSaveMicrosoftSetup: (MicrosoftSetupConfig) -> GoogleSetupResult
     let onConnectMicrosoftTeams: () -> Void
     let onSignOutMicrosoftTeams: () -> Void
     let onClearMicrosoftTeamsPresence: () -> Void
@@ -2802,7 +2778,7 @@ struct AppSettingsView: View {
         initialTeamsPresenceEnabled: Bool,
         currentTeamsPresenceEnabled: Bool,
         microsoftConnectionState: MicrosoftConnectionState,
-        initialMicrosoftSetupConfig: MicrosoftSetupConfig,
+        microsoftSetupConfig: MicrosoftSetupConfig,
         initialMailBadgeEnabled: Bool,
         initialLaunchAtLoginEnabled: Bool,
         onDone: @escaping () -> Void,
@@ -2815,7 +2791,6 @@ struct AppSettingsView: View {
         onSendTestCalendarNotification: @escaping () -> Void,
         onUpdateMeetingFocus: @escaping (Bool) -> Bool,
         onApproveMeetingFocus: @escaping () -> Void,
-        onSaveMicrosoftSetup: @escaping (MicrosoftSetupConfig) -> GoogleSetupResult,
         onConnectMicrosoftTeams: @escaping () -> Void,
         onSignOutMicrosoftTeams: @escaping () -> Void,
         onClearMicrosoftTeamsPresence: @escaping () -> Void,
@@ -2827,8 +2802,6 @@ struct AppSettingsView: View {
         _draftCalendarNotificationsEnabled = State(initialValue: initialCalendarNotificationsEnabled)
         _draftMeetingFocusEnabled = State(initialValue: initialMeetingFocusEnabled)
         _draftTeamsPresenceEnabled = State(initialValue: initialTeamsPresenceEnabled)
-        _draftMicrosoftClientID = State(initialValue: initialMicrosoftSetupConfig.clientID)
-        _draftMicrosoftTenantID = State(initialValue: initialMicrosoftSetupConfig.tenantID)
         _draftMailBadgeEnabled = State(initialValue: initialMailBadgeEnabled)
         _draftLaunchAtLoginEnabled = State(initialValue: initialLaunchAtLoginEnabled)
         self.connectionState = connectionState
@@ -2836,6 +2809,7 @@ struct AppSettingsView: View {
         self.meetingFocusApprovalPending = meetingFocusApprovalPending
         self.currentTeamsPresenceEnabled = currentTeamsPresenceEnabled
         self.microsoftConnectionState = microsoftConnectionState
+        self.microsoftSetupConfig = microsoftSetupConfig
         self.onDone = onDone
         self.onSignOut = onSignOut
         self.onResetGoogleSetup = onResetGoogleSetup
@@ -2846,7 +2820,6 @@ struct AppSettingsView: View {
         self.onSendTestCalendarNotification = onSendTestCalendarNotification
         self.onUpdateMeetingFocus = onUpdateMeetingFocus
         self.onApproveMeetingFocus = onApproveMeetingFocus
-        self.onSaveMicrosoftSetup = onSaveMicrosoftSetup
         self.onConnectMicrosoftTeams = onConnectMicrosoftTeams
         self.onSignOutMicrosoftTeams = onSignOutMicrosoftTeams
         self.onClearMicrosoftTeamsPresence = onClearMicrosoftTeamsPresence
@@ -2926,12 +2899,9 @@ struct AppSettingsView: View {
 
                     SectionTitle("Teams status")
                     MicrosoftTeamsSettingsCard(
-                        clientID: $draftMicrosoftClientID,
-                        tenantID: $draftMicrosoftTenantID,
                         connectionState: microsoftConnectionState,
+                        isConfigured: microsoftSetupConfig.isComplete,
                         isPresenceEnabled: teamsPresenceBinding,
-                        feedback: microsoftSetupFeedback,
-                        onSave: saveMicrosoftSetup,
                         onConnect: onConnectMicrosoftTeams,
                         onSignOut: onSignOutMicrosoftTeams,
                         onClearPresence: onClearMicrosoftTeamsPresence
@@ -3032,22 +3002,6 @@ struct AppSettingsView: View {
                 draftTeamsPresenceEnabled = onUpdateTeamsPresence(newValue)
             }
         )
-    }
-
-    private func saveMicrosoftSetup() {
-        let result = onSaveMicrosoftSetup(
-            MicrosoftSetupConfig(clientID: draftMicrosoftClientID, tenantID: draftMicrosoftTenantID)
-        )
-        microsoftSetupFeedback = result
-        guard result.isSuccess,
-              let normalized = try? MicrosoftSetupConfig.normalized(
-                clientID: draftMicrosoftClientID,
-                tenantID: draftMicrosoftTenantID
-              ) else {
-            return
-        }
-        draftMicrosoftClientID = normalized.clientID
-        draftMicrosoftTenantID = normalized.tenantID
     }
 
     private var mailBadgeBinding: Binding<Bool> {
@@ -5057,7 +5011,10 @@ enum GoogleAppBundleSetup {
                 guard let schemes = urlType["CFBundleURLSchemes"] as? [String] else {
                     return urlType
                 }
-                let remainingSchemes = schemes.filter { !$0.hasPrefix("com.googleusercontent.apps.") }
+                let remainingSchemes = schemes.filter { scheme in
+                    !scheme.hasPrefix("com.googleusercontent.apps.") &&
+                        !isLegacyMicrosoftURLScheme(scheme)
+                }
                 guard !remainingSchemes.isEmpty else {
                     return nil
                 }
@@ -5096,7 +5053,10 @@ enum GoogleAppBundleSetup {
             guard let schemes = urlType["CFBundleURLSchemes"] as? [String] else {
                 return urlType
             }
-            let remainingSchemes = schemes.filter { !$0.hasPrefix("com.googleusercontent.apps.") }
+            let remainingSchemes = schemes.filter { scheme in
+                !scheme.hasPrefix("com.googleusercontent.apps.") &&
+                    !isLegacyMicrosoftURLScheme(scheme)
+            }
             guard !remainingSchemes.isEmpty else {
                 return nil
             }
@@ -5106,12 +5066,12 @@ enum GoogleAppBundleSetup {
         } ?? []
 
         output.append(["CFBundleURLSchemes": [googleScheme]])
-        if !output.contains(where: { urlType in
-            (urlType["CFBundleURLSchemes"] as? [String])?.contains(MicrosoftSetupConfig.redirectScheme) == true
-        }) {
-            output.append(["CFBundleURLSchemes": [MicrosoftSetupConfig.redirectScheme]])
-        }
         return output
+    }
+
+    private static func isLegacyMicrosoftURLScheme(_ scheme: String) -> Bool {
+        let normalized = scheme.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return normalized == "gwsmenu"
     }
 
     private static func writeInfoPlist(_ plist: [String: Any], to infoURL: URL) throws {

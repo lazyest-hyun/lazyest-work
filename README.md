@@ -10,7 +10,7 @@ Native macOS menu bar app for Google Workspace shortcuts, read-only Google Calen
 - Shows your upcoming Google Calendar events and the current or next meeting in the menu bar.
 - Sends optional macOS desktop alerts before meetings.
 - Can turn on Do Not Disturb during accepted meetings.
-- Can set Microsoft Teams status to Busy during accepted meetings.
+- Can set Microsoft Teams status to Busy during accepted meetings when Teams sign-in is available in the build.
 - Shows an optional Gmail Inbox unread badge, capped as `99+`.
 - Stores Google and Microsoft sign-in credentials in Keychain.
 
@@ -108,19 +108,15 @@ GWS Menu can turn on macOS Do Not Disturb during accepted meetings.
 Only current accepted meetings with a meeting link or guests trigger Focus. Tentative, unanswered, and declined meetings only show their status color in Upcoming.
 If Do Not Disturb was already on before a meeting starts, GWS Menu leaves it on after the meeting ends.
 
-### Microsoft Teams Busy During Meetings
+### Teams Status During Meetings
 
-GWS Menu can set your Teams presence to `Busy / InAConferenceCall` during accepted Google Calendar meetings.
+If Teams sign-in is available in your build, GWS Menu can set your Teams presence to `Busy / InAConferenceCall` during accepted Google Calendar meetings.
 
 1. Open **Settings -> Teams status**.
-2. In Microsoft Entra admin center, create an app registration for a public/native client.
-3. Add this redirect URI: `gwsmenu://microsoft-auth`.
-4. Add delegated Microsoft Graph permissions: `User.Read` and `Presence.ReadWrite`.
-5. Copy the **Application (client) ID** into GWS Menu, keep tenant as `organizations` unless your company requires a tenant ID, then click **Save Setup**.
-6. Click **Connect** once and approve Microsoft sign-in.
-7. Turn on **Microsoft Teams Busy**.
+2. Click **Connect Microsoft** and approve once.
+3. Turn on **Teams status**.
 
-GWS Menu uses Microsoft Graph presence sessions, not preferred presence. It clears only its own session when the meeting ends or the setting is turned off. Personal Microsoft accounts are not supported by Microsoft Graph Presence API, and some company tenants may require admin approval.
+The Microsoft token is stored in Keychain. GWS Menu clears only the presence session it created when the meeting ends or the setting is turned off.
 
 ## Updating
 
@@ -137,7 +133,7 @@ The installer closes any running `GWSMenu` process, replaces `~/Applications/GWS
 
 - Calendar access uses `https://www.googleapis.com/auth/calendar.readonly`.
 - The Gmail badge uses `https://www.googleapis.com/auth/gmail.labels` only when enabled.
-- Teams Busy uses Microsoft Graph delegated `User.Read` and `Presence.ReadWrite` only when enabled.
+- Teams status uses Microsoft Graph delegated `User.Read` and `Presence.ReadWrite` only when enabled.
 - GWS Menu does not read Gmail sender, subject, body, or attachments.
 - GWS Menu does not send desktop mail alerts.
 - Do Not Disturb during meetings uses macOS Do Not Disturb; your Focus settings decide which apps or people are allowed through.
@@ -153,8 +149,8 @@ The installer closes any running `GWSMenu` process, replaces `~/Applications/GWS
 - **Meeting alerts do not appear**: allow GWS Menu in **System Settings -> Notifications**, then enable Meeting alerts again.
 - **Need to verify alerts**: open **Settings -> Calendar -> Test alert** and click **Send**.
 - **Do Not Disturb during meetings asks for approval**: click **Approve**, then click **Add Shortcut** once in macOS. GWS Menu turns the setting on automatically after approval.
-- **Teams Connect fails with admin approval**: your Microsoft tenant blocks user consent for Presence.ReadWrite. Ask a Microsoft admin to approve the app registration.
-- **Teams redirect URI mismatch**: add `gwsmenu://microsoft-auth` to the Microsoft app registration.
+- **Connect Microsoft is disabled**: reinstall a build that includes Teams sign-in configuration.
+- **Teams status asks for organization approval**: your Microsoft organization controls Graph presence consent. Try a permitted account or ask your organization to allow the permission.
 - **Old behavior after updating**: rerun the installer command; it restarts the menu app after replacing it.
 - **Need icons only**:
 
@@ -171,4 +167,12 @@ cargo test
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 swift build --package-path macos/GWSMenuBar
+```
+
+Optional Teams sign-in build values:
+
+```bash
+GWS_MICROSOFT_CLIENT_ID='YOUR_MICROSOFT_CLIENT_ID' \
+GWS_MICROSOFT_TENANT_ID='organizations' \
+swift scripts/sync-google-app-icons.swift --accept-google-brand-terms
 ```
