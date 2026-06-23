@@ -10,9 +10,10 @@ Native macOS menu bar app for Google Workspace shortcuts, read-only Google Calen
 - Shows your upcoming Google Calendar events and the current or next meeting in the menu bar.
 - Sends optional macOS desktop alerts before meetings.
 - Can turn on Do Not Disturb during accepted meetings.
-- Can set Microsoft Teams status to Busy during accepted meetings when Teams sign-in is available in the build.
+- Can ask for confirmation before Microsoft Teams outgoing call buttons and block Control-scroll zoom in Teams.
+- Can set Microsoft Teams status to Busy during accepted meetings through Microsoft 365 CLI when Microsoft Graph consent is available.
 - Shows an optional Gmail Inbox unread badge, capped as `99+`.
-- Stores Google and Microsoft sign-in credentials in Keychain.
+- Stores Google sign-in in Keychain. Teams status uses Microsoft 365 CLI's stored grant unless a native Microsoft client ID is configured.
 
 ## Quick Start
 
@@ -30,7 +31,7 @@ cd gws-menu-app
 swift scripts/sync-google-app-icons.swift --accept-google-brand-terms
 ```
 
-This command downloads Google product icons into git-ignored local resources, builds the macOS app, installs it to `~/Applications/GWSMenu.app`, and opens it.
+This command downloads Google product icons into git-ignored local resources, builds the macOS app, installs it to `/Applications/GWSMenu.app`, and opens it.
 
 No DMG, notarization, or paid Apple Developer account is required when you build from source.
 
@@ -76,19 +77,23 @@ Paste the Client ID into GWS Menu and click **Save Setup**. GWS Menu updates the
 
 Do not use **Web application** or **Desktop app** credentials. If Google shows a `client_secret`, it is the wrong credential type. GWS Menu does not use or store a client secret.
 
-After sign-in, GWS Menu shows a small **Finish setup** card for optional features:
+GWS Menu shows a small **Finish setup** card for optional features:
 
+- **Teams call block**: asks for macOS Accessibility/event-monitoring permission when enabled. Microsoft sign-in is not needed.
+- **Open at login**: adds GWS Menu to macOS Login Items.
 - **Meeting alerts**: asks for macOS notification permission only when you enable it.
 - **Do Not Disturb during meetings**: reuses existing approval, or shows an **Approve** button for one-time macOS approval.
-- **Gmail badge**: asks for Gmail unread-count permission only when you enable it.
-- **Open at login**: adds GWS Menu to macOS Login Items.
+- **Gmail badge**: asks for Gmail unread-count permission only when you enable it. After opening Gmail from GWS Menu, the unread count refreshes faster for two minutes.
+
+On a first install, **Teams call block** and **Open at login** can be enabled before connecting Google. Calendar alerts and Gmail badge appear after Google Calendar is connected.
 
 ## Settings
 
 Open Settings from the gear button in GWS Menu. Changes save automatically.
 
 - **Calendar**: choose desktop alert timing, send a test alert, and optionally enable Do Not Disturb during meetings.
-- **Teams status**: connect Microsoft once and optionally set Teams Busy during accepted meetings.
+- **Teams call block**: require confirmation before supported Teams outgoing call buttons and block Control-scroll zoom inside Teams.
+- **Teams status**: optional Microsoft Graph integration through Microsoft 365 CLI.
 - **Mail**: enable or disable the Gmail unread badge.
 - **General**: enable Open at login or open the GitHub repository.
 - **Account**: sign out of Google.
@@ -110,13 +115,30 @@ If Do Not Disturb was already on before a meeting starts, GWS Menu leaves it on 
 
 ### Teams Status During Meetings
 
-If Teams sign-in is available in your build, GWS Menu can set your Teams presence to `Busy / InAConferenceCall` during accepted Google Calendar meetings.
+GWS Menu can set your Teams preferred presence to `Busy / Busy` during accepted Google Calendar meetings.
 
 1. Open **Settings -> Teams status**.
-2. Click **Connect Microsoft** and approve once.
-3. Turn on **Teams status**.
+2. Turn on **Teams status**.
+3. If Microsoft is not connected, approve Microsoft CLI browser sign-in once.
+4. The Microsoft 365 CLI stores the Microsoft grant and reuses it until it expires or is revoked.
 
-The Microsoft token is stored in Keychain. GWS Menu clears only the presence session it created when the meeting ends or the setting is turned off.
+When you connect or enable Teams status, GWS Menu uses Microsoft 365 CLI with Microsoft's first-party **Microsoft Graph Command Line Tools** app ID (`14d82eec-204b-4c2f-b7e8-296a70dab67e`) if the app bundle has no native Microsoft client ID. If the `m365` command is not installed, GWS Menu falls back to `npx -p @pnp/cli-microsoft365 m365`, so Node.js/npm must be available.
+
+For a managed build, pass `GWS_MICROSOFT_CLIENT_ID` and optionally `GWS_MICROSOFT_TENANT_ID` only after the organization has approved that Microsoft Graph client. The installer does not copy stale Microsoft client IDs from older app bundles.
+
+The settings card shows whether GWS Menu set Teams preferred status to Busy, kept an existing GWS Menu Busy value, cleared it, or is waiting for an active accepted meeting. Teams can take a few minutes to show a successful Microsoft Graph presence update.
+
+GWS Menu calls Microsoft Graph `setUserPreferredPresence` while a qualifying meeting is active and `clearUserPreferredPresence` when the meeting ends, the setting is turned off, or Microsoft is signed out.
+
+### Teams Call Block
+
+Teams call block is local-only and does not require Microsoft sign-in.
+
+1. Open **Settings -> Teams call block**.
+2. Turn on **Teams call block**.
+3. If macOS permission is missing, turning the toggle on opens System Settings. Enable **GWS Menu** there, then GWS Menu turns the feature on automatically.
+
+GWS Menu blocks only Teams elements whose accessibility role and label identify an outgoing call action, such as **Meet now**, **Audio call**, **Video call**, **음성 통화**, or **영상 통화**. It does not intentionally block dropdown buttons, hang-up buttons, chat/profile buttons, or Teams status sync.
 
 ## Updating
 
@@ -127,19 +149,20 @@ git pull
 swift scripts/sync-google-app-icons.swift --accept-google-brand-terms
 ```
 
-The installer closes any running `GWSMenu` process, replaces `~/Applications/GWSMenu.app`, and opens the new version.
+The installer closes any running `GWSMenu` process, replaces `/Applications/GWSMenu.app`, removes an older `~/Applications/GWSMenu.app` copy when present, and opens the new version.
 
 ## Privacy and Permissions
 
 - Calendar access uses `https://www.googleapis.com/auth/calendar.readonly`.
 - The Gmail badge uses `https://www.googleapis.com/auth/gmail.labels` only when enabled.
-- Teams status uses Microsoft Graph delegated `User.Read` and `Presence.ReadWrite` only when enabled.
-- GWS Menu does not read Gmail sender, subject, body, or attachments.
+- Teams status uses Microsoft Graph delegated presence access through Microsoft 365 CLI unless a native Microsoft client ID is explicitly configured.
+- Teams call block uses macOS Accessibility and event monitoring permissions only when enabled. It does not require Microsoft Graph or Teams sign-in.
+- GWS Menu does not read Gmail sender, subject, body, attachments, or message IDs.
 - GWS Menu does not send desktop mail alerts.
 - Do Not Disturb during meetings uses macOS Do Not Disturb; your Focus settings decide which apps or people are allowed through.
 - GWS Menu does not turn off a Do Not Disturb state that was already active before it touched it.
 - Google auth is handled by Google Sign-In and Keychain.
-- Microsoft auth uses OAuth code flow with PKCE. The Microsoft refresh token is stored in Keychain.
+- Microsoft auth for Teams status uses Microsoft 365 CLI unless a native Microsoft client ID is explicitly configured. GWS Menu gets the Graph user ID from `/me`.
 - Google product icons are downloaded locally and ignored by Git.
 
 ## Troubleshooting
@@ -149,8 +172,11 @@ The installer closes any running `GWSMenu` process, replaces `~/Applications/GWS
 - **Meeting alerts do not appear**: allow GWS Menu in **System Settings -> Notifications**, then enable Meeting alerts again.
 - **Need to verify alerts**: open **Settings -> Calendar -> Test alert** and click **Send**.
 - **Do Not Disturb during meetings asks for approval**: click **Approve**, then click **Add Shortcut** once in macOS. GWS Menu turns the setting on automatically after approval.
-- **Connect Microsoft is disabled**: reinstall a build that includes Teams sign-in configuration.
-- **Teams status asks for organization approval**: your Microsoft organization controls Graph presence consent. Try a permitted account or ask your organization to allow the permission.
+- **Teams status backend is missing**: install Node.js/npm or the `m365` CLI, then turn on **Settings -> Teams status** again.
+- **Teams status asks for organization approval**: your Microsoft organization controls Graph presence consent. Use an approved Microsoft Graph Command Line Tools grant or leave Teams status off.
+- **Teams Busy does not appear immediately**: the settings card reports the Graph result first. The Teams app can lag behind the service state for a few minutes.
+- **Teams call block stays off after enabling**: open **Settings -> Teams call block**, turn it on again, and enable **GWS Menu** in macOS System Settings if macOS asks.
+- **Teams call block misses an icon-only Teams button**: Teams must expose that control through macOS Accessibility with a call label. GWS Menu avoids coordinate-only guesses because they can block unrelated buttons.
 - **Old behavior after updating**: rerun the installer command; it restarts the menu app after replacing it.
 - **Need icons only**:
 
@@ -169,10 +195,4 @@ cargo clippy --all-targets -- -D warnings
 swift build --package-path macos/GWSMenuBar
 ```
 
-Optional Teams sign-in build values:
-
-```bash
-GWS_MICROSOFT_CLIENT_ID='YOUR_MICROSOFT_CLIENT_ID' \
-GWS_MICROSOFT_TENANT_ID='organizations' \
-swift scripts/sync-google-app-icons.swift --accept-google-brand-terms
-```
+Teams status uses Microsoft 365 CLI with Microsoft's first-party Microsoft Graph Command Line Tools app ID when no native Microsoft client is configured.

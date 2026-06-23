@@ -16,6 +16,25 @@ MICROSOFT_TENANT_ID="${GWS_MICROSOFT_TENANT_ID:-organizations}"
 MICROSOFT_REDIRECT_SCHEME="msauth.$BUNDLE_ID"
 CODE_SIGN_IDENTITY="${GWS_CODESIGN_IDENTITY:-}"
 TEAM_ID="${GWS_TEAM_ID:-}"
+LOCAL_CODE_SIGN_IDENTITY="GWS Menu Local Code Signing"
+USE_AD_HOC_SIGNING=0
+CODESIGN_TIMESTAMP_ARGS=(--timestamp)
+
+case "$CODE_SIGN_IDENTITY" in
+  -|ad-hoc|adhoc)
+    CODE_SIGN_IDENTITY=""
+    USE_AD_HOC_SIGNING=1
+    ;;
+esac
+
+if [[ "$USE_AD_HOC_SIGNING" -eq 0 && -z "$CODE_SIGN_IDENTITY" ]] &&
+  security find-identity -v -p codesigning 2>/dev/null | grep -F "\"$LOCAL_CODE_SIGN_IDENTITY\"" >/dev/null; then
+  CODE_SIGN_IDENTITY="$LOCAL_CODE_SIGN_IDENTITY"
+fi
+
+if [[ "$CODE_SIGN_IDENTITY" == "$LOCAL_CODE_SIGN_IDENTITY" ]]; then
+  CODESIGN_TIMESTAMP_ARGS=(--timestamp=none)
+fi
 
 swift build --package-path "$PACKAGE_DIR" -c release -Xswiftc -gnone
 
@@ -109,9 +128,9 @@ if [[ -n "$CODE_SIGN_IDENTITY" ]]; then
 </dict>
 </plist>
 ENTITLEMENTS_PLIST
-    codesign --force --options runtime --timestamp --sign "$CODE_SIGN_IDENTITY" --entitlements "$ENTITLEMENTS" "$APP_DIR"
+    codesign --force --options runtime "${CODESIGN_TIMESTAMP_ARGS[@]}" --sign "$CODE_SIGN_IDENTITY" --entitlements "$ENTITLEMENTS" "$APP_DIR"
   else
-    codesign --force --options runtime --timestamp --sign "$CODE_SIGN_IDENTITY" "$APP_DIR"
+    codesign --force --options runtime "${CODESIGN_TIMESTAMP_ARGS[@]}" --sign "$CODE_SIGN_IDENTITY" "$APP_DIR"
   fi
 else
   codesign --force --sign - "$APP_DIR" >/dev/null 2>&1 || true

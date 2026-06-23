@@ -135,7 +135,6 @@ public enum MeetingNotificationPolicy {
 }
 
 public struct TeamsPresenceSetRequest: Equatable {
-    public let sessionID: String
     public let availability: String
     public let activity: String
     public let expirationDuration: String
@@ -144,11 +143,11 @@ public struct TeamsPresenceSetRequest: Equatable {
 
 public struct TeamsManagedPresenceSession: Codable, Equatable {
     public let eventID: String
-    public let sessionID: String
+    public let sessionID: String?
     public let userID: String
     public let expiresAt: Date
 
-    public init(eventID: String, sessionID: String, userID: String, expiresAt: Date) {
+    public init(eventID: String, sessionID: String? = nil, userID: String, expiresAt: Date) {
         self.eventID = eventID
         self.sessionID = sessionID
         self.userID = userID
@@ -157,8 +156,8 @@ public struct TeamsManagedPresenceSession: Codable, Equatable {
 }
 
 public enum TeamsPresencePolicy {
-    public static let graphMinimumDurationMinutes = 5
-    public static let graphMaximumDurationMinutes = 240
+    public static let preferredPresenceMinimumDurationMinutes = 1
+    public static let preferredPresenceMaximumDurationMinutes = 24 * 60
 
     public static func desiredState<Event: FocusEventRepresentable>(
         events: [Event],
@@ -168,20 +167,18 @@ public enum TeamsPresencePolicy {
         MeetingFocusPolicy.desiredState(events: events, now: now, isEnabled: isEnabled)
     }
 
-    public static func setPresenceRequest(
-        sessionID: String,
+    public static func preferredPresenceRequest(
         until end: Date,
         now: Date
     ) -> TeamsPresenceSetRequest {
         let remainingMinutes = Int(ceil(max(0, end.timeIntervalSince(now)) / 60))
         let clampedMinutes = min(
-            max(remainingMinutes, graphMinimumDurationMinutes),
-            graphMaximumDurationMinutes
+            max(remainingMinutes, preferredPresenceMinimumDurationMinutes),
+            preferredPresenceMaximumDurationMinutes
         )
         return TeamsPresenceSetRequest(
-            sessionID: sessionID,
             availability: "Busy",
-            activity: "InAConferenceCall",
+            activity: "Busy",
             expirationDuration: graphDuration(minutes: clampedMinutes),
             expiresAt: now.addingTimeInterval(TimeInterval(clampedMinutes * 60))
         )
@@ -207,15 +204,14 @@ public enum TeamsPresencePolicy {
     ) -> TeamsManagedPresenceSession {
         TeamsManagedPresenceSession(
             eventID: eventID,
-            sessionID: request.sessionID,
             userID: userID,
             expiresAt: request.expiresAt
         )
     }
 
     private static func graphDuration(minutes: Int) -> String {
-        if minutes == graphMaximumDurationMinutes {
-            return "PT4H"
+        if minutes % 60 == 0 {
+            return "PT\(minutes / 60)H"
         }
         return "PT\(minutes)M"
     }

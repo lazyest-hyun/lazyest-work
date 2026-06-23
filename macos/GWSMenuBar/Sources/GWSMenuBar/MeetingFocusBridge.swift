@@ -1,22 +1,43 @@
 import Foundation
 import GWSMenuCore
 
+enum MeetingFocusApplyResult: Equatable {
+    case idle
+    case activated
+    case alreadyActive
+    case cleared
+    case pausedForManualOverride(eventID: String)
+}
+
 final class MeetingFocusBridge {
     private static let helperShortcutName = "DND Raycast"
 
     private let managedActiveKey = "meetingFocusManagedActive"
     private let managedEventIDKey = "meetingFocusManagedEventID"
     private let managedPreexistingActiveKey = "meetingFocusPreexistingActive"
+    private let pausedEventIDKey = "meetingFocusPausedEventID"
 
-    func apply(_ state: MeetingFocusState) throws {
+    func apply(_ state: MeetingFocusState) throws -> MeetingFocusApplyResult {
         let defaults = UserDefaults.standard
         switch state {
         case .active(_, let eventID):
+            if pausedEventID(defaults) == eventID {
+                return .pausedForManualOverride(eventID: eventID)
+            } else if pausedEventID(defaults) != nil {
+                clearPausedEvent(defaults)
+            }
+
             if defaults.bool(forKey: managedActiveKey) {
                 if defaults.string(forKey: managedEventIDKey) != eventID {
                     defaults.set(eventID, forKey: managedEventIDKey)
+                    return .alreadyActive
                 }
-                return
+                if (try? currentFocusIsActive()) == false {
+                    savePausedEvent(eventID, defaults)
+                    clearManagedFocusState(defaults)
+                    return .pausedForManualOverride(eventID: eventID)
+                }
+                return .alreadyActive
             }
             guard try isHelperShortcutInstalled() else {
                 throw AppError.focusShortcutFailed(name: Self.helperShortcutName, detail: "helper shortcut is not installed")
@@ -28,18 +49,21 @@ final class MeetingFocusBridge {
             defaults.set(true, forKey: managedActiveKey)
             defaults.set(eventID, forKey: managedEventIDKey)
             defaults.set(wasAlreadyActive, forKey: managedPreexistingActiveKey)
+            return wasAlreadyActive ? .alreadyActive : .activated
         case .inactive:
+            clearPausedEvent(defaults)
             guard defaults.bool(forKey: managedActiveKey) else {
-                return
+                return .idle
             }
             guard try isHelperShortcutInstalled() else {
                 clearManagedFocusState(defaults)
-                return
+                return .cleared
             }
             if !defaults.bool(forKey: managedPreexistingActiveKey) {
                 try runHelperShortcut(command: "off")
             }
             clearManagedFocusState(defaults)
+            return .cleared
         }
     }
 
@@ -78,6 +102,18 @@ final class MeetingFocusBridge {
         defaults.set(false, forKey: managedActiveKey)
         defaults.removeObject(forKey: managedEventIDKey)
         defaults.removeObject(forKey: managedPreexistingActiveKey)
+    }
+
+    private func pausedEventID(_ defaults: UserDefaults) -> String? {
+        defaults.string(forKey: pausedEventIDKey)
+    }
+
+    private func savePausedEvent(_ eventID: String, _ defaults: UserDefaults) {
+        defaults.set(eventID, forKey: pausedEventIDKey)
+    }
+
+    private func clearPausedEvent(_ defaults: UserDefaults) {
+        defaults.removeObject(forKey: pausedEventIDKey)
     }
 
     private func runShortcuts(arguments: [String], standardInput: String?) throws -> String {

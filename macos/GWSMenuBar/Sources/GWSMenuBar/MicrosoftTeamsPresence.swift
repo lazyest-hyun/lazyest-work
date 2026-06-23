@@ -21,6 +21,10 @@ struct MicrosoftSetupConfig: Equatable {
         "msauth.\(bundleID)"
     }
 
+    static func redirectURI(for bundleID: String) -> String {
+        "\(redirectScheme(for: bundleID))://auth"
+    }
+
     var clientID: String
     var tenantID: String
 
@@ -29,7 +33,7 @@ struct MicrosoftSetupConfig: Equatable {
     }
 
     static func normalized(clientID: String, tenantID: String) throws -> MicrosoftSetupConfig {
-        let normalizedClientID = clientID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedClientID = extractedClientID(from: clientID) ?? clientID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard UUID(uuidString: normalizedClientID) != nil else {
             throw MicrosoftSetupError.missingBundleConfig
         }
@@ -40,6 +44,71 @@ struct MicrosoftSetupConfig: Equatable {
         }
 
         return MicrosoftSetupConfig(clientID: normalizedClientID, tenantID: normalizedTenantID)
+    }
+
+    static func extractedClientID(from input: String) -> String? {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if UUID(uuidString: trimmed) != nil {
+            return trimmed
+        }
+
+        if let data = trimmed.data(using: .utf8) {
+            if let json = try? JSONSerialization.jsonObject(with: data),
+               let value = firstClientIDValue(in: json) {
+                return value
+            }
+            if let plist = try? PropertyListSerialization.propertyList(from: data, format: nil),
+               let value = firstClientIDValue(in: plist) {
+                return value
+            }
+        }
+
+        return firstClientIDMatch(in: trimmed)
+    }
+
+    private static func firstClientIDValue(in object: Any) -> String? {
+        if let string = object as? String, UUID(uuidString: string.trimmingCharacters(in: .whitespacesAndNewlines)) != nil {
+            return string.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        if let dictionary = object as? [String: Any] {
+            for key in ["client_id", "clientId", "appId", "applicationId", "GWSMicrosoftClientID"] {
+                if let value = dictionary[key] as? String,
+                   UUID(uuidString: value.trimmingCharacters(in: .whitespacesAndNewlines)) != nil {
+                    return value.trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+            }
+            for value in dictionary.values {
+                if let found = firstClientIDValue(in: value) {
+                    return found
+                }
+            }
+        }
+
+        if let array = object as? [Any] {
+            for value in array {
+                if let found = firstClientIDValue(in: value) {
+                    return found
+                }
+            }
+        }
+
+        return nil
+    }
+
+    private static func firstClientIDMatch(in text: String) -> String? {
+        let pattern = #"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return nil
+        }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = regex.firstMatch(in: text, range: range),
+              let matchRange = Range(match.range, in: text) else {
+            return nil
+        }
+        let value = String(text[matchRange])
+        return UUID(uuidString: value) != nil ? value : nil
     }
 
     private static func isValidTenantID(_ value: String) -> Bool {
@@ -450,21 +519,44 @@ struct MicrosoftProfile: Decodable {
     let userPrincipalName: String?
 }
 
+struct MicrosoftPresence: Decodable, Equatable {
+    let availability: String?
+    let activity: String?
+
+    var isPreferredBusy: Bool {
+        availability == "Busy" && activity == "Busy"
+    }
+}
+
+enum TeamsPresenceApplyResult: Equatable {
+    case idle
+    case alreadyActive(until: Date)
+    case applied(until: Date)
+    case cleared
+    case pausedForManualOverride(eventID: String)
+}
+
 @MainActor
 final class MicrosoftTeamsPresenceService {
     private let authClient: MicrosoftGraphAuthClient
+    private let cliClient: Microsoft365CLIClient
     private let managedSessionKey = "teamsPresenceManagedSession"
+    private let pausedEventIDKey = "teamsPresencePausedEventID"
 
-    init(authClient: MicrosoftGraphAuthClient) {
+    init(authClient: MicrosoftGraphAuthClient, cliClient: Microsoft365CLIClient) {
         self.authClient = authClient
+        self.cliClient = cliClient
     }
 
-    func apply(_ state: MeetingFocusState, now: Date) async throws {
+    func apply(_ state: MeetingFocusState, now: Date) async throws -> TeamsPresenceApplyResult {
         switch state {
         case .active(let end, let eventID):
-            try await setBusyIfNeeded(until: end, eventID: eventID, now: now)
+            return try await setBusyIfNeeded(until: end, eventID: eventID, now: now)
         case .inactive:
+            let hadManagedSession = loadManagedSession(UserDefaults.standard) != nil
             try await clearManagedPresenceIfNeeded()
+            clearPausedEvent(UserDefaults.standard)
+            return hadManagedSession ? .cleared : .idle
         }
     }
 
@@ -475,12 +567,46 @@ final class MicrosoftTeamsPresenceService {
         }
 
         do {
-            let accessToken = try await authClient.accessToken()
-            try await postPresenceAction(
-                path: "/users/\(session.userID.pathSegmentEncoded)/presence/clearPresence",
-                accessToken: accessToken,
-                body: ["sessionId": session.sessionID]
-            )
+            if usesNativeGraphAuth {
+                let accessToken = try await authClient.accessToken()
+                try await postPresenceAction(
+                    path: "/users/\(session.userID.pathSegmentEncoded)/presence/clearUserPreferredPresence",
+                    accessToken: accessToken,
+                    body: [:]
+                )
+            } else {
+                try await cliClient.clearPreferredPresence(userID: session.userID)
+            }
+        } catch {
+            if !isMissingPresenceSession(error) {
+                throw error
+            }
+        }
+        clearManagedState(defaults)
+    }
+
+    func clearCurrentPreferredPresence() async throws {
+        let defaults = UserDefaults.standard
+        let userID: String
+        if let session = loadManagedSession(defaults) {
+            userID = session.userID
+        } else if usesNativeGraphAuth {
+            userID = try await authClient.graphUserID()
+        } else {
+            userID = try await cliClient.profile().id
+        }
+
+        do {
+            if usesNativeGraphAuth {
+                let accessToken = try await authClient.accessToken()
+                try await postPresenceAction(
+                    path: "/users/\(userID.pathSegmentEncoded)/presence/clearUserPreferredPresence",
+                    accessToken: accessToken,
+                    body: [:]
+                )
+            } else {
+                try await cliClient.clearPreferredPresence(userID: userID)
+            }
         } catch {
             if !isMissingPresenceSession(error) {
                 throw error
@@ -493,39 +619,62 @@ final class MicrosoftTeamsPresenceService {
         clearManagedState(UserDefaults.standard)
     }
 
-    private func setBusyIfNeeded(until end: Date, eventID: String, now: Date) async throws {
+    private func setBusyIfNeeded(
+        until end: Date,
+        eventID: String,
+        now: Date
+    ) async throws -> TeamsPresenceApplyResult {
         let defaults = UserDefaults.standard
         let managedSession = loadManagedSession(defaults)
+        if pausedEventID(defaults) == eventID {
+            return .pausedForManualOverride(eventID: eventID)
+        } else if pausedEventID(defaults) != nil {
+            clearPausedEvent(defaults)
+        }
+
+        if let managedSession,
+           managedSession.eventID == eventID,
+           managedSession.expiresAt > now {
+            let presence = try await currentPresence()
+            if !presence.isPreferredBusy {
+                savePausedEvent(eventID, defaults)
+                clearManagedState(defaults)
+                return .pausedForManualOverride(eventID: eventID)
+            }
+        }
+
         guard TeamsPresencePolicy.shouldRefreshManagedPresence(
             eventID: eventID,
             managedSession: managedSession,
             now: now
         ) else {
-            return
+            return managedSession.map { .alreadyActive(until: $0.expiresAt) } ?? .idle
         }
 
-        let savedConfig = MicrosoftSetupSettings.load()
-        let config = try MicrosoftSetupConfig.normalized(
-            clientID: savedConfig.clientID,
-            tenantID: savedConfig.tenantID
-        )
-        let request = TeamsPresencePolicy.setPresenceRequest(sessionID: config.clientID, until: end, now: now)
-        let accessToken = try await authClient.accessToken()
-        let userID = try await authClient.graphUserID()
-        try await postPresenceAction(
-            path: "/users/\(userID.pathSegmentEncoded)/presence/setPresence",
-            accessToken: accessToken,
-            body: [
-                "sessionId": request.sessionID,
-                "availability": request.availability,
-                "activity": request.activity,
-                "expirationDuration": request.expirationDuration
-            ]
-        )
+        let request = TeamsPresencePolicy.preferredPresenceRequest(until: end, now: now)
+        let userID: String
+        if usesNativeGraphAuth {
+            let accessToken = try await authClient.accessToken()
+            userID = try await authClient.graphUserID()
+            try await postPresenceAction(
+                path: "/users/\(userID.pathSegmentEncoded)/presence/setUserPreferredPresence",
+                accessToken: accessToken,
+                body: [
+                    "availability": request.availability,
+                    "activity": request.activity,
+                    "expirationDuration": request.expirationDuration
+                ]
+            )
+        } else {
+            let profile = try await cliClient.profile()
+            userID = profile.id
+            try await cliClient.setPreferredPresence(userID: userID, request: request)
+        }
         saveManagedSession(
             TeamsPresencePolicy.managedSession(eventID: eventID, request: request, userID: userID),
             defaults
         )
+        return .applied(until: request.expiresAt)
     }
 
     private func postPresenceAction(path: String, accessToken: String, body: [String: String]) async throws {
@@ -545,13 +694,47 @@ final class MicrosoftTeamsPresenceService {
         }
     }
 
+    private func currentPresence() async throws -> MicrosoftPresence {
+        if usesNativeGraphAuth {
+            let accessToken = try await authClient.accessToken()
+            var request = URLRequest(url: URL(string: "https://graph.microsoft.com/v1.0/me/presence")!)
+            request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                throw AppError.invalidResponse
+            }
+            guard (200..<300).contains(http.statusCode) else {
+                let body = String(data: data, encoding: .utf8) ?? "HTTP \(http.statusCode)"
+                throw AppError.api("Microsoft Graph presence read failed (\(http.statusCode)): \(body)")
+            }
+            return try JSONDecoder().decode(MicrosoftPresence.self, from: data)
+        }
+        return try await cliClient.currentPresence()
+    }
+
     private func isMissingPresenceSession(_ error: Error) -> Bool {
         error.localizedDescription.localizedCaseInsensitiveContains("404") ||
             error.localizedDescription.localizedCaseInsensitiveContains("notfound")
     }
 
+    private var usesNativeGraphAuth: Bool {
+        MicrosoftSetupSettings.load().isComplete
+    }
+
     private func clearManagedState(_ defaults: UserDefaults) {
         defaults.removeObject(forKey: managedSessionKey)
+    }
+
+    private func pausedEventID(_ defaults: UserDefaults) -> String? {
+        defaults.string(forKey: pausedEventIDKey)
+    }
+
+    private func savePausedEvent(_ eventID: String, _ defaults: UserDefaults) {
+        defaults.set(eventID, forKey: pausedEventIDKey)
+    }
+
+    private func clearPausedEvent(_ defaults: UserDefaults) {
+        defaults.removeObject(forKey: pausedEventIDKey)
     }
 
     private func loadManagedSession(_ defaults: UserDefaults) -> TeamsManagedPresenceSession? {

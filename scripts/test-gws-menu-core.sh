@@ -115,20 +115,18 @@ struct GWSMenuCoreBehaviorTest {
         expectEqual(FocusStatusParser.parse("enabled"), true, "English enabled status means DND is on")
 
         let remaining = date("2026-06-11T09:04:15Z")
-        let shortPresence = TeamsPresencePolicy.setPresenceRequest(
-            sessionID: "11111111-2222-3333-4444-555555555555",
+        let shortPresence = TeamsPresencePolicy.preferredPresenceRequest(
             until: date("2026-06-11T09:06:00Z"),
             now: remaining
         )
         expectEqual(shortPresence.availability, "Busy", "Teams presence uses Busy availability")
-        expectEqual(shortPresence.activity, "InAConferenceCall", "Teams presence uses conference call activity")
-        expectEqual(shortPresence.expirationDuration, "PT5M", "Teams presence clamps short meetings to Graph minimum")
-        let longPresence = TeamsPresencePolicy.setPresenceRequest(
-            sessionID: "11111111-2222-3333-4444-555555555555",
+        expectEqual(shortPresence.activity, "Busy", "Teams preferred presence uses Busy activity")
+        expectEqual(shortPresence.expirationDuration, "PT2M", "Teams preferred presence can expire at the meeting end")
+        let longPresence = TeamsPresencePolicy.preferredPresenceRequest(
             until: date("2026-06-11T15:30:00Z"),
             now: focusNow
         )
-        expectEqual(longPresence.expirationDuration, "PT4H", "Teams presence clamps long meetings to Graph maximum")
+        expectEqual(longPresence.expirationDuration, "PT375M", "Teams preferred presence can span long meetings")
         expectEqual(
             TeamsPresencePolicy.desiredState(events: [needsAction, accepted, declined], now: focusNow, isEnabled: true),
             .active(until: accepted.end, eventID: "accepted"),
@@ -144,8 +142,8 @@ struct GWSMenuCoreBehaviorTest {
             request: longPresence,
             userID: "graph-user-original"
         )
-        expectEqual(managedSession.sessionID, "11111111-2222-3333-4444-555555555555", "managed session keeps the app session ID used for setPresence")
-        expectEqual(managedSession.userID, "graph-user-original", "managed session keeps the Microsoft Graph user ID used for setPresence")
+        expectEqual(managedSession.sessionID, nil, "managed session does not use an app session ID for user preferred presence")
+        expectEqual(managedSession.userID, "graph-user-original", "managed session keeps the Microsoft Graph user ID used for preferred presence")
         expectEqual(
             TeamsPresencePolicy.shouldRefreshManagedPresence(eventID: "accepted", managedSession: managedSession, now: focusNow),
             false,

@@ -26,7 +26,7 @@ let args = Set(CommandLine.arguments.dropFirst())
 guard args.contains(acceptedFlag) else {
     fputs("""
     This script downloads Google product icon assets for local/internal use only,
-    then installs GWS Menu into ~/Applications.
+    then installs GWS Menu into /Applications.
 
     The public repository intentionally does not ship third-party brand assets.
     Before running this, review Google's brand/trademark rules and make sure your
@@ -284,7 +284,7 @@ if !args.contains(noInstallFlag) {
     let installScript = rootDirectory.appendingPathComponent("scripts/install-macos-app.sh")
     let process = Process()
     process.executableURL = installScript
-    process.arguments = args.contains(noOpenFlag) ? ["--user", "--no-open"] : ["--user"]
+    process.arguments = args.contains(noOpenFlag) ? ["--no-open"] : []
     try process.run()
     process.waitUntilExit()
 
