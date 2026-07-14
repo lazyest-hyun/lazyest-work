@@ -164,10 +164,46 @@ struct GWSMenuCoreBehaviorTest {
             "managed presence refreshes when the active meeting changes"
         )
 
+        var gmailPlan = GmailUnreadReconciliationPlan(
+            baselineCount: 4,
+            observationRetryDelays: [2, 4, 8]
+        )
+        expectEqual(gmailPlan.nextStep(observedCount: nil), .wait(2), "unknown Gmail count is not treated as a read change")
+        expectEqual(gmailPlan.nextStep(observedCount: 4), .wait(4), "unchanged Gmail count backs off")
+        expectEqual(gmailPlan.nextStep(observedCount: 3), .wait(5), "changed Gmail count enters settle checks")
+        expectEqual(gmailPlan.nextStep(observedCount: nil), .wait(5), "failed Gmail settle check is retried")
+        expectEqual(gmailPlan.nextStep(observedCount: 3), .wait(5), "first stable Gmail count keeps settling")
+        expectEqual(gmailPlan.nextStep(observedCount: 3), .stopBecauseCountSettled, "two stable Gmail counts stop reconciliation")
+
+        var unknownBaselineGmailPlan = GmailUnreadReconciliationPlan(
+            baselineCount: nil,
+            observationRetryDelays: [2, 4, 8]
+        )
+        expectEqual(unknownBaselineGmailPlan.nextStep(observedCount: nil), .wait(2), "missing Gmail baseline retries")
+        expectEqual(unknownBaselineGmailPlan.nextStep(observedCount: 5), .wait(4), "first Gmail result establishes a baseline")
+        expectEqual(unknownBaselineGmailPlan.nextStep(observedCount: 4), .wait(5), "a later Gmail change still enters settle checks")
+        expectEqual(unknownBaselineGmailPlan.nextStep(observedCount: 4), .wait(5), "unknown-baseline Gmail result starts settling")
+        expectEqual(unknownBaselineGmailPlan.nextStep(observedCount: 4), .stopBecauseCountSettled, "unknown-baseline Gmail result settles cleanly")
+
+        var changingGmailPlan = GmailUnreadReconciliationPlan(
+            baselineCount: 4,
+            observationRetryDelays: [2],
+            maximumFollowUpChecks: 5
+        )
+        expectEqual(changingGmailPlan.nextStep(observedCount: 3), .wait(5), "first Gmail read starts settling")
+        expectEqual(changingGmailPlan.nextStep(observedCount: 3), .wait(5), "stable Gmail count is observed again")
+        expectEqual(changingGmailPlan.nextStep(observedCount: 2), .wait(5), "another Gmail read resets settling")
+        expectEqual(changingGmailPlan.nextStep(observedCount: 2), .wait(5), "new Gmail count starts a fresh stable window")
+        expectEqual(changingGmailPlan.nextStep(observedCount: 2), .stopBecauseCountSettled, "new Gmail count settles cleanly")
+
         print("PASS: GWSMenuCore behavior")
     }
 }
 SWIFT
 
-swiftc "$ROOT/macos/GWSMenuBar/Sources/GWSMenuCore/GWSMenuCore.swift" "$TMPDIR/TestGWSMenuCore.swift" -o "$TMPDIR/gws-menu-core-test"
+swiftc \
+  "$ROOT/macos/GWSMenuBar/Sources/GWSMenuCore/GWSMenuCore.swift" \
+  "$ROOT/macos/GWSMenuBar/Sources/GWSMenuCore/GmailUnreadReconciliationPlan.swift" \
+  "$TMPDIR/TestGWSMenuCore.swift" \
+  -o "$TMPDIR/gws-menu-core-test"
 "$TMPDIR/gws-menu-core-test"

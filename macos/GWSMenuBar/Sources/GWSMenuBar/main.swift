@@ -1,9 +1,13 @@
 import AppKit
 import Combine
 import Foundation
+#if GWS_LOCAL_FILE_KEYCHAIN
 import GTMAppAuth
+#endif
 import GWSMenuCore
+#if GWS_LOCAL_FILE_KEYCHAIN
 import ObjectiveC
+#endif
 import ServiceManagement
 import SwiftUI
 import UniformTypeIdentifiers
@@ -21,6 +25,8 @@ final class AppModel: ObservableObject {
     @Published var connectionState = ConnectionState.loading
     @Published var lastError: String?
     @Published var lastErrorRecovery: ErrorRecoveryAction?
+    @Published var gmailError: String?
+    @Published var gmailErrorRecovery: ErrorRecoveryAction?
     @Published var isBusy = false
     @Published var workspaceApps = WorkspaceAppStore.load()
     @Published var gmailUnreadCount: Int?
@@ -52,10 +58,16 @@ final class AppModel: ObservableObject {
             TeamsCallBlockSettings.saveEnabled(teamsCallBlockEnabled)
         }
     }
+    @Published var teamsControlScrollBlockEnabled: Bool {
+        didSet {
+            TeamsCallBlockSettings.saveControlScrollEnabled(teamsControlScrollBlockEnabled)
+        }
+    }
     @Published var teamsCallBlockPermissionPending = TeamsCallBlockSettings.loadPendingEnableAfterPermission()
     @Published var teamsCallBlockStatusText = "Teams call block is off."
     @Published var teamsPresenceStatusText = "Connect Microsoft, then turn on Teams Busy for accepted meetings."
     @Published var teamsConnectionState = MicrosoftConnectionState.missingSetup
+    @Published var teamsOperation = MicrosoftTeamsOperation.idle
     @Published var teamsSetupConfig = MicrosoftSetupSettings.load()
     @Published var mailBadgeEnabled: Bool {
         didSet {
@@ -76,6 +88,7 @@ final class AppModel: ObservableObject {
         meetingFocusEnabled = FocusSettings.loadMeetingFocusEnabled()
         teamsPresenceEnabled = TeamsPresenceSettings.loadEnabled()
         teamsCallBlockEnabled = TeamsCallBlockSettings.loadEnabled()
+        teamsControlScrollBlockEnabled = TeamsCallBlockSettings.loadControlScrollEnabled()
         mailBadgeEnabled = MailBadgeSettings.loadEnabled()
         launchAtLoginEnabled = LaunchAtLoginSettings.isEnabled()
         setupChecklistDismissed = SetupChecklistSettings.loadDismissed()
@@ -83,17 +96,18 @@ final class AppModel: ObservableObject {
 }
 
 enum ErrorRecoveryAction: Equatable {
-    case googleSetup
+    case googleConnection
     case gmailPermission
     case notificationSettings
+    case loginItemsSettings
 
     var buttonTitle: String {
         switch self {
-        case .googleSetup:
-            return "Setup"
+        case .googleConnection:
+            return "Connect"
         case .gmailPermission:
             return "Allow"
-        case .notificationSettings:
+        case .notificationSettings, .loginItemsSettings:
             return "Settings"
         }
     }
@@ -105,25 +119,105 @@ enum UnreadCountFormatter {
     }
 }
 
+private final class LockedFormatter<Formatter>: @unchecked Sendable {
+    private let formatter: Formatter
+    private let lock = NSLock()
+
+    init(_ makeFormatter: () -> Formatter) {
+        formatter = makeFormatter()
+    }
+
+    func use<Result>(_ body: (Formatter) -> Result) -> Result {
+        lock.lock()
+        defer { lock.unlock() }
+        return body(formatter)
+    }
+}
+
+private enum AppDateFormatters {
+    private static let iso8601 = LockedFormatter {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }
+    private static let fractionalISO8601 = LockedFormatter {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }
+    private static let shortTime = LockedFormatter {
+        let formatter = DateFormatter()
+        formatter.locale = .autoupdatingCurrent
+        formatter.timeZone = .autoupdatingCurrent
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        return formatter
+    }
+    private static let timeInterval = LockedFormatter {
+        let formatter = DateIntervalFormatter()
+        formatter.locale = .autoupdatingCurrent
+        formatter.timeZone = .autoupdatingCurrent
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        return formatter
+    }
+    private static let koreanWeekday = weekdayFormatter(localeIdentifier: "ko_KR")
+    private static let englishWeekday = weekdayFormatter(localeIdentifier: "en_US_POSIX")
+
+    static func iso8601String(from date: Date) -> String {
+        iso8601.use { $0.string(from: date) }
+    }
+
+    static func parseISO8601(_ value: String) -> Date? {
+        fractionalISO8601.use { $0.date(from: value) }
+            ?? iso8601.use { $0.date(from: value) }
+    }
+
+    static func shortTimeString(from date: Date) -> String {
+        shortTime.use { $0.string(from: date) }
+    }
+
+    static func timeIntervalString(from start: Date, to end: Date) -> String {
+        timeInterval.use { $0.string(from: start, to: end) }
+    }
+
+    static func weekdayString(from date: Date, language: AppLanguage) -> String {
+        let formatter = language == .korean ? koreanWeekday : englishWeekday
+        return formatter.use { $0.string(from: date) }
+    }
+
+    private static func weekdayFormatter(localeIdentifier: String) -> LockedFormatter<DateFormatter> {
+        LockedFormatter {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: localeIdentifier)
+            formatter.timeZone = .autoupdatingCurrent
+            formatter.dateFormat = "EEE"
+            return formatter
+        }
+    }
+}
+
+@MainActor
 enum AppImages {
     private static let googleBlue = NSColor(calibratedRed: 66.0 / 255.0, green: 133.0 / 255.0, blue: 244.0 / 255.0, alpha: 1)
     private static let googleRed = NSColor(calibratedRed: 219.0 / 255.0, green: 68.0 / 255.0, blue: 55.0 / 255.0, alpha: 1)
     private static let googleYellow = NSColor(calibratedRed: 244.0 / 255.0, green: 180.0 / 255.0, blue: 0, alpha: 1)
     private static let googleGreen = NSColor(calibratedRed: 15.0 / 255.0, green: 157.0 / 255.0, blue: 88.0 / 255.0, alpha: 1)
+    private static let standardIcon = makeAppIcon(size: 18)
 
     static func menuBarIcon(unreadCount: Int? = nil) -> NSImage {
         guard let unreadCount, unreadCount > 0 else {
-            return appIcon(size: 18)
+            return standardIcon
         }
 
         return badgedMenuBarIcon(countText: UnreadCountFormatter.display(unreadCount))
     }
 
     static func headerIcon() -> NSImage {
-        appIcon(size: 18)
+        standardIcon
     }
 
-    private static func appIcon(size: CGFloat) -> NSImage {
+    private static func makeAppIcon(size: CGFloat) -> NSImage {
         if let icon = bundledAppIcon(size: size) {
             return icon
         }
@@ -136,7 +230,7 @@ enum AppImages {
         let image = NSImage(size: NSSize(width: size, height: size))
         image.lockFocus()
 
-        appIcon(size: size).draw(in: NSRect(x: 0, y: 0, width: size, height: size))
+        standardIcon.draw(in: NSRect(x: 0, y: 0, width: size, height: size))
 
         let badgeHeight: CGFloat = 9.5
         let badgeWidth = min(max(CGFloat(countText.count) * 4.3 + 6.0, badgeHeight), size - 1)
@@ -202,6 +296,20 @@ enum AppImages {
     }
 }
 
+private enum PopoverLayout {
+    static let width: CGFloat = 420
+    static let maximumHeight: CGFloat = 590
+    static let minimumHomeHeight: CGFloat = 280
+    static let settingsMinimumHeight: CGFloat = 420
+    static let headerHeight: CGFloat = 52
+    static let dividerHeight: CGFloat = 1
+    static let homeChromeHeight = headerHeight + dividerHeight
+
+    static func quantized(_ value: CGFloat) -> CGFloat {
+        (value / 4).rounded(.up) * 4
+    }
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -216,12 +324,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private let teamsCallBlocker = MicrosoftTeamsCallBlocker()
     private let meetingFocusBridge = MeetingFocusBridge()
     private lazy var popover: NSPopover = makePopover()
+    private var pendingPopoverHeight: CGFloat?
     private var cancellables = Set<AnyCancellable>()
-    private var timer: Timer?
+    private lazy var refreshScheduler = EventDrivenRefreshScheduler(
+        onRemoteRefresh: { [weak self] _ in
+            await self?.refreshEvents(showsActivity: false)
+        },
+        onLocalRefresh: { [weak self] triggers in
+            self?.handleScheduledLocalRefresh(triggers)
+        },
+        onGmailRefresh: { [weak self] in
+            guard let self else { return nil }
+            return await self.refreshGmailUnread()
+        }
+    )
     private var meetingFocusApprovalTask: Task<Void, Never>?
+    private var meetingFocusSyncTask: Task<Void, Never>?
+    private var meetingFocusSyncGeneration = UUID()
     private var teamsPresenceTask: Task<Void, Never>?
     private var microsoftCLIConnectionTask: Task<Void, Never>?
-    private var gmailFastRefreshTask: Task<Void, Never>?
+    private var isRefreshingEvents = false
+    private var isRefreshingGmail = false
+    private var microsoftCLIConnectionLastCheckedAt: Date?
     private var statusIconUnreadText: String?
     private var renderedStatusTitle: String?
     private var text: AppText {
@@ -229,24 +353,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        AppLog.lifecycle.notice("GWS Menu launched")
         NSApp.setActivationPolicy(.accessory)
         UNUserNotificationCenter.current().delegate = self
         configureApplicationMenu()
         configureStatusItem()
         bindModel()
-        teamsCallBlocker.configure(savedEnabled: model.teamsCallBlockEnabled)
+        teamsCallBlocker.configure(
+            savedEnabled: model.teamsCallBlockEnabled,
+            savedControlScrollBlockEnabled: model.teamsControlScrollBlockEnabled
+        )
+        refreshScheduler.start()
         let skipGoogleRestore = InstallLaunchSettings.consumeSkipGoogleRestoreOnce()
 
         Task {
             await restoreAndRefresh(skipGoogleRestore: skipGoogleRestore)
-        }
-
-        timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.updateNow()
-                await self?.refreshEvents(showsActivity: false)
-                await self?.refreshGmailUnread()
-            }
         }
     }
 
@@ -261,8 +382,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     func applicationWillTerminate(_ notification: Notification) {
         meetingFocusApprovalTask?.cancel()
+        meetingFocusSyncTask?.cancel()
         teamsPresenceTask?.cancel()
-        gmailFastRefreshTask?.cancel()
+        refreshScheduler.stop()
         teamsCallBlocker.stop()
         turnOffManagedMeetingFocus()
     }
@@ -280,41 +402,70 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     private func makePopover() -> NSPopover {
         let popover = NSPopover()
+        let maximumHeight = maximumPopoverHeight()
         popover.behavior = .transient
         popover.animates = true
-        popover.contentSize = NSSize(width: 420, height: 590)
-        popover.contentViewController = NSHostingController(
+        popover.contentSize = NSSize(
+            width: PopoverLayout.width,
+            height: min(maximumHeight, PopoverLayout.minimumHomeHeight)
+        )
+        let hostingController = NSHostingController(
             rootView: GWSMenuPopover(
                 model: model,
+                maximumHeight: maximumHeight,
+                onPreferredHeightChange: { [weak self] height in
+                    self?.updatePopoverHeight(height)
+                },
                 onSignIn: { [weak self] in self?.signIn() },
                 onRefresh: { [weak self] in self?.refreshFromMenu() },
                 onSignOut: { [weak self] in self?.signOut() },
-                onResetGoogleSetup: { [weak self] in self?.resetGoogleSetup() },
                 onDismissSetupChecklist: { [weak self] in self?.dismissSetupChecklist() },
                 onEnableCalendarAlerts: { [weak self] in self?.enableCalendarAlertsFromMenu() },
                 onEnableGmailBadge: { [weak self] in self?.enableGmailBadgeFromMenu() },
                 onEnableLaunchAtLogin: { [weak self] in self?.enableLaunchAtLoginFromMenu() },
                 onUpdateLanguage: { [weak self] language in self?.updateLanguage(language) },
-                onApplyGoogleSetup: { [weak self] config in
-                    self?.applyGoogleSetup(config) ?? .failure("App is not ready to apply setup.")
-                },
                 onUpdateWorkspaceApps: { [weak self] apps in self?.updateWorkspaceApps(apps) },
                 onUpdateAlertLeadMinutes: { [weak self] minutes in self?.updateAlertLeadMinutes(minutes) },
                 onUpdateCalendarNotifications: { [weak self] isEnabled in self?.updateCalendarNotificationsEnabled(isEnabled) },
                 onSendTestCalendarNotification: { [weak self] in self?.sendTestCalendarNotificationFromSettings() },
                 onUpdateMeetingFocus: { [weak self] isEnabled in self?.updateMeetingFocusEnabled(isEnabled) ?? false },
                 onApproveMeetingFocus: { [weak self] in self?.requestMeetingFocusApproval() },
+                onInstallMicrosoftCLI: { [weak self] in self?.installMicrosoft365CLI() },
                 onConnectMicrosoftTeams: { [weak self] in self?.connectMicrosoftTeams() },
                 onSignOutMicrosoftTeams: { [weak self] in self?.signOutMicrosoftTeams() },
                 onUpdateTeamsPresence: { [weak self] isEnabled in self?.updateTeamsPresenceEnabled(isEnabled) ?? false },
                 onUpdateTeamsCallBlock: { [weak self] isEnabled in self?.updateTeamsCallBlockEnabled(isEnabled) ?? false },
+                onUpdateTeamsControlScrollBlock: { [weak self] isEnabled in self?.updateTeamsControlScrollBlockEnabled(isEnabled) ?? false },
                 onRefreshTeamsCallBlockPermissions: { [weak self] in self?.refreshTeamsCallBlockPermissions() },
                 onUpdateMailBadge: { [weak self] isEnabled in self?.updateMailBadgeEnabled(isEnabled) },
                 onUpdateLaunchAtLogin: { [weak self] isEnabled in self?.updateLaunchAtLoginEnabled(isEnabled) },
                 onOpenURL: { [weak self] url in self?.openURLFromMenu(url) }
             )
         )
+        hostingController.sizingOptions = []
+        popover.contentViewController = hostingController
         return popover
+    }
+
+    private func maximumPopoverHeight() -> CGFloat {
+        let visibleHeight = statusItem.button?.window?.screen?.visibleFrame.height
+            ?? NSScreen.main?.visibleFrame.height
+            ?? 670
+        return min(PopoverLayout.maximumHeight, max(PopoverLayout.minimumHomeHeight, visibleHeight - 80))
+    }
+
+    private func updatePopoverHeight(_ requestedHeight: CGFloat) {
+        let height = min(
+            maximumPopoverHeight(),
+            max(PopoverLayout.minimumHomeHeight, PopoverLayout.quantized(requestedHeight))
+        )
+        pendingPopoverHeight = height
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let pendingHeight = self.pendingPopoverHeight else { return }
+            self.pendingPopoverHeight = nil
+            guard abs(self.popover.contentSize.height - pendingHeight) >= 4 else { return }
+            self.popover.contentSize = NSSize(width: PopoverLayout.width, height: pendingHeight)
+        }
     }
 
     private func configureApplicationMenu() {
@@ -359,6 +510,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             }
             .store(in: &cancellables)
 
+        teamsCallBlocker.$isControlScrollBlockEnabled
+            .receive(on: RunLoop.main)
+            .sink { [weak self] isEnabled in
+                guard let self else { return }
+                if self.model.teamsControlScrollBlockEnabled != isEnabled {
+                    self.model.teamsControlScrollBlockEnabled = isEnabled
+                }
+                self.refreshUI()
+            }
+            .store(in: &cancellables)
+
         teamsCallBlocker.$statusText
             .receive(on: RunLoop.main)
             .sink { [weak self] statusText in
@@ -397,6 +559,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             await refreshEvents()
             await refreshGmailUnread()
         } catch {
+            AppLog.lifecycle.debug("Saved Google session was not restored")
             model.connectionState = authClient.connectionState()
             model.lastError = nil
             model.lastErrorRecovery = nil
@@ -408,6 +571,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     private func refreshEvents(showsActivity: Bool = true) async {
+        guard !isRefreshingEvents else { return }
+        isRefreshingEvents = true
+        defer { isRefreshingEvents = false }
+
         updateNow()
         guard model.connectionState.isConnected else {
             if !model.events.isEmpty {
@@ -417,6 +584,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             cancelCalendarNotifications()
             syncMeetingFocus()
             syncTeamsPresence()
+            updateScheduledMeetingRefreshes()
             return
         }
 
@@ -438,22 +606,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             if model.connectionState != connectionState {
                 model.connectionState = connectionState
             }
-            if model.lastError != nil || model.lastErrorRecovery != nil {
+            if model.lastErrorRecovery == .googleConnection {
                 model.lastError = nil
                 model.lastErrorRecovery = nil
             }
         } catch {
-            if !model.events.isEmpty {
-                model.events = []
-                eventsChanged = true
-            }
+            AppLog.calendar.error("Calendar refresh failed: \(error.localizedDescription, privacy: .private)")
             let errorMessage = userFacingError(error)
             if model.lastError != errorMessage {
                 model.lastError = errorMessage
             }
-            if model.lastErrorRecovery != .googleSetup {
-                model.lastErrorRecovery = .googleSetup
-            }
+            model.lastErrorRecovery = googleRecoveryAction(for: error)
             let connectionState = authClient.connectionState()
             if model.connectionState != connectionState {
                 model.connectionState = connectionState
@@ -469,6 +632,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
         syncMeetingFocus()
         syncTeamsPresence()
+        updateScheduledMeetingRefreshes()
+    }
+
+    private func handleScheduledLocalRefresh(_ triggers: Set<LocalRefreshTrigger>) {
+        updateNow()
+        refreshUI()
+
+        if triggers.contains(.meetingBoundary) {
+            syncMeetingFocus()
+            syncTeamsPresence()
+        } else if triggers.contains(.teamsPresenceRefresh) {
+            syncTeamsPresence()
+        }
+    }
+
+    private func updateScheduledMeetingRefreshes() {
+        refreshScheduler.updateMeetings(
+            model.events,
+            alertLeadMinutes: model.alertLeadMinutes,
+            teamsPresenceEnabled: model.teamsPresenceEnabled
+        )
     }
 
     private func refreshUI() {
@@ -503,7 +687,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             setStatusTitle("", toolTip: "Sign in to Google Calendar")
         case .connected:
             let now = model.now
-            if let active = model.events.first(where: { $0.start <= now && $0.end > now }) {
+            if let active = model.events.first(where: {
+                $0.selfResponseStatus != .declined && $0.start <= now && $0.end > now
+            }) {
                 setStatusTitle(
                     statusTitle(meetingText: "Now · \(active.menuBarTitle)"),
                     toolTip: statusToolTip(meetingToolTip: active.statusToolTip)
@@ -511,7 +697,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 return
             }
 
-            guard let next = model.events.first(where: { $0.start > now }) else {
+            guard let next = model.events.first(where: {
+                $0.selfResponseStatus != .declined && $0.start > now
+            }) else {
                 setStatusTitle(statusTitle(), toolTip: statusToolTip(meetingToolTip: "No upcoming meetings"))
                 return
             }
@@ -563,23 +751,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     private func openURLFromMenu(_ url: URL) {
-        if WorkspaceApp.isGmailURL(url) {
-            startGmailFastRefreshAfterOpen()
+        if WorkspaceApp.isGmailURL(url),
+           model.mailBadgeEnabled,
+           model.connectionState.isConnected {
+            refreshScheduler.startGmailUnreadReconciliation(
+                baselineCount: model.gmailUnreadCount
+            )
         }
         NSWorkspace.shared.open(url)
-    }
-
-    private func startGmailFastRefreshAfterOpen() {
-        guard model.mailBadgeEnabled, model.connectionState.isConnected else { return }
-        gmailFastRefreshTask?.cancel()
-        gmailFastRefreshTask = Task { @MainActor in
-            await self.refreshGmailUnread()
-            for _ in 0..<12 {
-                try? await Task.sleep(nanoseconds: 10_000_000_000)
-                guard !Task.isCancelled else { return }
-                await self.refreshGmailUnread()
-            }
-        }
     }
 
     private func setStatusTitle(_ title: String, toolTip: String?) {
@@ -603,20 +782,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             model.isBusy = true
             model.lastError = nil
             model.lastErrorRecovery = nil
+            model.gmailError = nil
+            model.gmailErrorRecovery = nil
             refreshUI()
 
             do {
-                try await authClient.signIn()
+                let grant = try await authClient.signIn(
+                    includeGmailLabels: model.mailBadgeEnabled
+                )
                 model.connectionState = authClient.connectionState()
                 await refreshEvents()
                 if model.mailBadgeEnabled {
-                    await enableGmailUnreadBadge()
+                    if grant.gmailLabelsGranted {
+                        await refreshGmailUnread()
+                    } else {
+                        model.mailBadgeEnabled = false
+                        model.gmailUnreadCount = nil
+                        model.gmailError = text.s(
+                            "Gmail unread count was not allowed.",
+                            "Gmail 안 읽은 개수 권한이 허용되지 않았습니다."
+                        )
+                        model.gmailErrorRecovery = .gmailPermission
+                    }
                 } else {
                     model.gmailUnreadCount = nil
                 }
             } catch {
                 model.lastError = userFacingError(error)
-                model.lastErrorRecovery = .googleSetup
+                model.lastErrorRecovery = googleRecoveryAction(for: error)
                 model.connectionState = authClient.connectionState()
             }
 
@@ -635,51 +828,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     @objc private func signOut() {
         authClient.signOut()
-        gmailFastRefreshTask?.cancel()
-        gmailFastRefreshTask = nil
+        refreshScheduler.cancelGmailUnreadReconciliation()
         model.events = []
         model.gmailUnreadCount = nil
         model.calendarNotificationsEnabled = false
         model.lastError = nil
         model.lastErrorRecovery = nil
+        model.gmailError = nil
+        model.gmailErrorRecovery = nil
         model.connectionState = authClient.connectionState()
         cancelCalendarNotifications()
         turnOffManagedMeetingFocus()
         syncTeamsPresence()
+        updateScheduledMeetingRefreshes()
         refreshUI()
-    }
-
-    private func resetGoogleSetup() {
-        guard !model.isBusy else { return }
-        model.isBusy = true
-        model.lastError = nil
-        model.lastErrorRecovery = nil
-        refreshUI()
-
-        Task {
-            do {
-                await authClient.clearSavedUserGrant()
-                try GoogleAppBundleSetup.reset()
-                gmailFastRefreshTask?.cancel()
-                gmailFastRefreshTask = nil
-                model.events = []
-                model.gmailUnreadCount = nil
-                model.calendarNotificationsEnabled = false
-                model.setupChecklistDismissed = false
-                model.connectionState = .missingBundleConfig
-                cancelCalendarNotifications()
-                turnOffManagedMeetingFocus()
-                syncTeamsPresence()
-                refreshUI()
-                relaunchApp()
-            } catch {
-                model.lastError = userFacingError(error)
-                model.lastErrorRecovery = .googleSetup
-                model.connectionState = authClient.connectionState()
-                model.isBusy = false
-                refreshUI()
-            }
-        }
     }
 
     private func updateWorkspaceApps(_ apps: [WorkspaceApp]) {
@@ -709,6 +871,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         model.lastError = nil
         model.lastErrorRecovery = nil
         refreshUI()
+        updateScheduledMeetingRefreshes()
         Task {
             await syncCalendarNotifications()
         }
@@ -792,13 +955,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     private func refreshMeetingFocusHelperStatus() {
-        let isInstalled = (try? meetingFocusBridge.isHelperShortcutInstalled()) ?? false
-        model.meetingFocusHelperInstalled = isInstalled
-        if isInstalled, enableMeetingFocusAfterHelperApproval() {
-            return
-        }
-        if !isInstalled, model.meetingFocusEnabled {
-            model.meetingFocusEnabled = false
+        let bridge = meetingFocusBridge
+        Task { @MainActor [weak self] in
+            let isInstalled = await Task.detached(priority: .utility) {
+                (try? bridge.isHelperShortcutInstalled()) ?? false
+            }.value
+            guard let self, !Task.isCancelled else { return }
+            self.model.meetingFocusHelperInstalled = isInstalled
+            if isInstalled, self.enableMeetingFocusAfterHelperApproval(isHelperInstalled: true) {
+                return
+            }
+            if !isInstalled, self.model.meetingFocusEnabled {
+                self.model.meetingFocusEnabled = false
+            }
         }
     }
 
@@ -809,8 +978,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 guard !Task.isCancelled else { return }
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 guard !Task.isCancelled else { return }
+                guard let bridge = self?.meetingFocusBridge else { return }
+                let isInstalled = await Task.detached(priority: .utility) {
+                    (try? bridge.isHelperShortcutInstalled()) == true
+                }.value
                 let didEnable = await MainActor.run {
-                    self?.enableMeetingFocusAfterHelperApproval() ?? false
+                    self?.enableMeetingFocusAfterHelperApproval(isHelperInstalled: isInstalled) ?? false
                 }
                 if didEnable { return }
             }
@@ -820,9 +993,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
     }
 
-    private func enableMeetingFocusAfterHelperApproval() -> Bool {
+    private func enableMeetingFocusAfterHelperApproval(isHelperInstalled: Bool? = nil) -> Bool {
         guard model.meetingFocusApprovalPending else { return false }
-        guard (try? meetingFocusBridge.isHelperShortcutInstalled()) == true else { return false }
+        guard isHelperInstalled ?? ((try? meetingFocusBridge.isHelperShortcutInstalled()) == true) else { return false }
         meetingFocusApprovalTask?.cancel()
         meetingFocusApprovalTask = nil
         model.meetingFocusApprovalPending = false
@@ -857,16 +1030,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         if model.teamsSetupConfig.isComplete {
             model.teamsConnectionState = microsoftAuthClient.connectionState()
         } else if microsoftCLIClient.isAvailable {
-            if allowCLIStatusCheck || model.teamsPresenceEnabled {
-                if !model.teamsConnectionState.isConnected, microsoftCLIConnectionTask == nil {
-                    model.teamsConnectionState = .signedOut
-                }
-                refreshMicrosoftCLIConnectionState()
-                if model.teamsPresenceEnabled, !model.teamsConnectionState.isConnected {
-                    shouldNormalizeAvailability = false
-                }
-            } else {
+            if model.teamsConnectionState == .missingSetup {
                 model.teamsConnectionState = .signedOut
+            }
+            refreshMicrosoftCLIConnectionState(
+                force: allowCLIStatusCheck && !model.teamsConnectionState.isConnected
+            )
+            if model.teamsPresenceEnabled, !model.teamsConnectionState.isConnected {
+                shouldNormalizeAvailability = false
             }
         } else {
             model.teamsConnectionState = .missingSetup
@@ -876,16 +1047,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
     }
 
-    private func refreshMicrosoftCLIConnectionState() {
-        guard microsoftCLIConnectionTask == nil else { return }
+    private func refreshMicrosoftCLIConnectionState(force: Bool = false) {
+        guard microsoftCLIConnectionTask == nil, model.teamsOperation == .idle else { return }
+        if !force,
+           let lastCheckedAt = microsoftCLIConnectionLastCheckedAt,
+           Date().timeIntervalSince(lastCheckedAt) < 300 {
+            return
+        }
+        model.teamsOperation = .checkingConnection
         microsoftCLIConnectionTask = Task {
             let state = await microsoftCLIClient.connectionState()
+            guard !Task.isCancelled else {
+                microsoftCLIConnectionTask = nil
+                model.teamsOperation = .idle
+                return
+            }
             model.teamsConnectionState = state
+            microsoftCLIConnectionLastCheckedAt = Date()
+            if state.isConnected, !model.teamsPresenceEnabled {
+                model.teamsPresenceStatusText = "Connected. Turn on Teams Busy for accepted meetings."
+            }
             if model.teamsPresenceEnabled, !state.isConnected {
                 normalizeTeamsPresenceAvailability()
             }
             microsoftCLIConnectionTask = nil
+            model.teamsOperation = .idle
             refreshUI()
+            if state.isConnected, model.teamsPresenceEnabled {
+                syncTeamsPresence()
+            }
         }
     }
 
@@ -896,16 +1086,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         case .connected:
             return
         case .missingSetup:
-            model.teamsPresenceEnabled = false
             model.teamsPresenceStatusText = "Off. Microsoft 365 CLI is not available."
         case .signedOut:
-            model.teamsPresenceEnabled = false
             model.teamsPresenceStatusText = "Off. Connect Microsoft with CLI before turning on Teams Busy."
+        case .failed:
+            model.teamsPresenceStatusText = "Microsoft connection check failed."
+        }
+    }
+
+    private func installMicrosoft365CLI() {
+        guard model.teamsOperation == .idle, !microsoftCLIClient.isAvailable else { return }
+        model.teamsOperation = .installingCLI
+        model.lastError = nil
+        model.lastErrorRecovery = nil
+        refreshUI()
+
+        Task {
+            do {
+                try await microsoftCLIClient.installIfNeeded()
+                model.teamsConnectionState = .signedOut
+                microsoftCLIConnectionLastCheckedAt = nil
+                model.lastError = nil
+                model.lastErrorRecovery = nil
+            } catch {
+                model.teamsConnectionState = .missingSetup
+                model.lastError = userFacingError(error)
+                model.lastErrorRecovery = nil
+            }
+            model.teamsOperation = .idle
+            refreshUI()
         }
     }
 
     private func connectMicrosoftTeams() {
-        guard !model.isBusy else { return }
+        guard model.teamsOperation == .idle else { return }
         guard model.teamsSetupConfig.isComplete else {
             connectMicrosoftTeamsWithCLI()
             return
@@ -926,7 +1140,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
 
         popover.performClose(nil)
-        model.isBusy = true
+        model.teamsOperation = .signingIn
         model.lastError = nil
         model.lastErrorRecovery = nil
         model.teamsPresenceStatusText = "Opening Microsoft sign-in."
@@ -945,22 +1159,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 model.teamsPresenceStatusText = "Microsoft sign-in did not finish."
                 refreshMicrosoftConnectionState(allowCLIStatusCheck: true)
             }
-            model.isBusy = false
+            model.teamsOperation = .idle
             refreshUI()
         }
     }
 
     private func connectMicrosoftTeamsWithCLI() {
+        guard model.teamsOperation == .idle else { return }
         guard microsoftCLIClient.isAvailable else {
-            model.lastError = "Microsoft 365 CLI is not available. Install Node.js/npm or m365 CLI first."
+            model.lastError = "Install Microsoft 365 CLI first."
             model.lastErrorRecovery = nil
-            model.teamsPresenceStatusText = "Off. Microsoft 365 CLI is not available."
             refreshUI()
             return
         }
-
-        popover.performClose(nil)
-        model.isBusy = true
+        model.teamsOperation = .signingIn
         model.lastError = nil
         model.lastErrorRecovery = nil
         model.teamsPresenceStatusText = "Opening Microsoft CLI sign-in."
@@ -971,30 +1183,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 try? await teamsPresenceService.clearManagedPresenceIfNeeded()
                 try await microsoftCLIClient.signIn()
                 model.teamsConnectionState = await microsoftCLIClient.connectionState()
+                microsoftCLIConnectionLastCheckedAt = Date()
                 model.teamsPresenceStatusText = "Connected with Microsoft CLI. Turn on Teams Busy for accepted meetings."
                 syncTeamsPresence()
             } catch {
                 model.lastError = userFacingError(error)
                 model.lastErrorRecovery = nil
                 model.teamsPresenceStatusText = "Microsoft CLI sign-in did not finish."
-                refreshMicrosoftConnectionState(allowCLIStatusCheck: true)
+                model.teamsConnectionState = .signedOut
+                microsoftCLIConnectionLastCheckedAt = nil
             }
-            model.isBusy = false
+            model.teamsOperation = .idle
             refreshUI()
         }
     }
 
     private func signOutMicrosoftTeams() {
+        guard model.teamsOperation == .idle else { return }
+        model.teamsOperation = .signingOut
         model.teamsPresenceEnabled = false
+        updateScheduledMeetingRefreshes()
         model.teamsPresenceStatusText = "Signing out of Microsoft."
         teamsPresenceTask?.cancel()
         teamsPresenceTask = Task {
             do {
-                try await teamsPresenceService.clearCurrentPreferredPresence()
+                try await teamsPresenceService.clearManagedPresenceIfNeeded()
                 if model.teamsSetupConfig.isComplete {
                     try microsoftAuthClient.signOut()
                 } else {
                     try await microsoftCLIClient.signOut()
+                    model.teamsConnectionState = .signedOut
+                    microsoftCLIConnectionLastCheckedAt = Date()
                 }
                 teamsPresenceService.clearLocalManagedState()
                 refreshMicrosoftConnectionState(allowCLIStatusCheck: true)
@@ -1006,6 +1225,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 model.lastErrorRecovery = nil
                 model.teamsPresenceStatusText = "Microsoft sign-out did not finish."
             }
+            model.teamsOperation = .idle
             refreshUI()
         }
     }
@@ -1019,6 +1239,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             model.teamsPresenceStatusText = "Off. Teams Busy automation is disabled."
             refreshUI()
             syncTeamsPresence()
+            updateScheduledMeetingRefreshes()
             return false
         }
 
@@ -1029,6 +1250,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 model.lastError = "Microsoft 365 CLI is not available. Install Node.js/npm or m365 CLI first."
                 model.lastErrorRecovery = nil
                 refreshUI()
+                updateScheduledMeetingRefreshes()
                 return false
             }
 
@@ -1038,7 +1260,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 model.lastErrorRecovery = nil
                 model.teamsPresenceStatusText = "Checking Microsoft CLI connection."
                 refreshUI()
-                enableTeamsPresenceAfterCLIConnectionCheck()
+                updateScheduledMeetingRefreshes()
+                refreshMicrosoftConnectionState(allowCLIStatusCheck: true)
                 return true
             }
         } else {
@@ -1049,6 +1272,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 model.lastError = "Connect Microsoft once before enabling Teams Busy."
                 model.lastErrorRecovery = nil
                 refreshUI()
+                updateScheduledMeetingRefreshes()
                 return false
             }
         }
@@ -1059,29 +1283,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         model.teamsPresenceStatusText = "Checking accepted meetings now."
         refreshUI()
         syncTeamsPresence()
+        updateScheduledMeetingRefreshes()
         return true
-    }
-
-    private func enableTeamsPresenceAfterCLIConnectionCheck() {
-        Task {
-            let state = await microsoftCLIClient.connectionState()
-            model.teamsConnectionState = state
-            guard state.isConnected else {
-                model.teamsPresenceEnabled = false
-                model.teamsPresenceStatusText = "Off. Connect Microsoft with CLI before turning on Teams Busy."
-                model.lastError = "Connect Microsoft once before enabling Teams Busy."
-                model.lastErrorRecovery = nil
-                refreshUI()
-                return
-            }
-
-            model.teamsPresenceEnabled = true
-            model.lastError = nil
-            model.lastErrorRecovery = nil
-            model.teamsPresenceStatusText = "Checking accepted meetings now."
-            refreshUI()
-            syncTeamsPresence()
-        }
     }
 
     private func updateTeamsCallBlockEnabled(_ isEnabled: Bool) -> Bool {
@@ -1096,9 +1299,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         return enabled
     }
 
+    private func updateTeamsControlScrollBlockEnabled(_ isEnabled: Bool) -> Bool {
+        model.lastError = nil
+        model.lastErrorRecovery = nil
+
+        let enabled = teamsCallBlocker.setControlScrollBlockEnabled(isEnabled, openPermissionsIfMissing: true)
+        model.teamsControlScrollBlockEnabled = enabled
+        model.teamsCallBlockPermissionPending = teamsCallBlocker.isPendingEnableAfterPermission
+        model.teamsCallBlockStatusText = teamsCallBlocker.statusText
+        refreshUI()
+        return enabled
+    }
+
     private func refreshTeamsCallBlockPermissions() {
         teamsCallBlocker.refreshPermissions()
         model.teamsCallBlockEnabled = teamsCallBlocker.isEnabled
+        model.teamsControlScrollBlockEnabled = teamsCallBlocker.isControlScrollBlockEnabled
         model.teamsCallBlockPermissionPending = teamsCallBlocker.isPendingEnableAfterPermission
         model.teamsCallBlockStatusText = teamsCallBlocker.statusText
         refreshUI()
@@ -1113,7 +1329,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             refreshMicrosoftConnectionState(allowCLIStatusCheck: automationEnabled)
             if automationEnabled, microsoftCLIClient.isAvailable, !model.teamsSetupConfig.isComplete {
                 model.teamsPresenceStatusText = "Checking Microsoft CLI connection."
-                enableTeamsPresenceAfterCLIConnectionCheck()
                 refreshUI()
                 return
             }
@@ -1122,6 +1337,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 model.teamsPresenceStatusText = "Off. Microsoft 365 CLI is not available."
             case .signedOut:
                 model.teamsPresenceStatusText = "Off. Connect Microsoft with CLI before turning on Teams Busy."
+            case .failed:
+                model.teamsPresenceStatusText = "Microsoft connection check failed."
             case .connected:
                 break
             }
@@ -1200,27 +1417,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     private func shortPresenceTime(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = .autoupdatingCurrent
-        formatter.dateStyle = .none
-        formatter.timeStyle = .short
-        return formatter.string(from: date)
+        AppDateFormatters.shortTimeString(from: date)
     }
 
     private func updateMailBadgeEnabled(_ isEnabled: Bool) {
         guard model.mailBadgeEnabled != isEnabled else { return }
         model.mailBadgeEnabled = isEnabled
-        model.lastError = nil
-        model.lastErrorRecovery = nil
+        model.gmailError = nil
+        model.gmailErrorRecovery = nil
         refreshUI()
 
         Task {
             if isEnabled {
                 await enableGmailUnreadBadge()
             } else {
-                gmailFastRefreshTask?.cancel()
-                gmailFastRefreshTask = nil
+                refreshScheduler.cancelGmailUnreadReconciliation()
                 model.gmailUnreadCount = nil
+                model.gmailError = nil
+                model.gmailErrorRecovery = nil
                 refreshUI()
             }
         }
@@ -1238,6 +1452,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         do {
             try LaunchAtLoginSettings.setEnabled(isEnabled)
             model.launchAtLoginEnabled = LaunchAtLoginSettings.isEnabled()
+            if isEnabled, LaunchAtLoginSettings.status == .requiresApproval {
+                model.lastError = text.s(
+                    "Allow GWS Menu in Login Items.",
+                    "로그인 항목에서 GWS Menu를 허용하세요."
+                )
+                model.lastErrorRecovery = .loginItemsSettings
+            }
         } catch {
             model.launchAtLoginEnabled = LaunchAtLoginSettings.isEnabled()
             model.lastError = userFacingError(error)
@@ -1270,6 +1491,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let now = Date()
         let leadSeconds = TimeInterval(model.alertLeadMinutes * 60)
         for event in model.events {
+            guard event.selfResponseStatus != .declined else { continue }
             let fireDate = event.start.addingTimeInterval(-leadSeconds)
             let identifier = event.notificationIdentifier(leadMinutes: model.alertLeadMinutes)
             guard fireDate > now.addingTimeInterval(3) else {
@@ -1319,10 +1541,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     private func sendTestCalendarNotification() async {
         do {
-            guard !shouldSuppressCalendarNotification() else {
-                return
-            }
-
             try await ensureNotificationAuthorization()
 
             let content = UNMutableNotificationContent()
@@ -1361,13 +1579,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             now: model.now,
             isEnabled: model.meetingFocusEnabled && model.connectionState.isConnected
         )
-        do {
-            let result = try meetingFocusBridge.apply(desiredState)
-            model.meetingFocusStatusText = meetingFocusStatusText(for: result)
-        } catch {
-            model.lastError = userFacingError(error)
-            model.lastErrorRecovery = nil
-            refreshUI()
+        meetingFocusSyncTask?.cancel()
+        let generation = UUID()
+        meetingFocusSyncGeneration = generation
+        let bridge = meetingFocusBridge
+        meetingFocusSyncTask = Task { @MainActor [weak self] in
+            let outcome = await Task.detached(priority: .utility) {
+                do {
+                    return Result<MeetingFocusApplyResult, AppError>.success(try bridge.apply(desiredState))
+                } catch {
+                    return Result<MeetingFocusApplyResult, AppError>.failure(.api(error.localizedDescription))
+                }
+            }.value
+
+            guard let self,
+                  !Task.isCancelled,
+                  self.meetingFocusSyncGeneration == generation else {
+                return
+            }
+            switch outcome {
+            case .success(let result):
+                AppLog.meetingFocus.debug("Meeting Focus sync completed")
+                self.model.meetingFocusStatusText = self.meetingFocusStatusText(for: result)
+            case .failure(let error):
+                AppLog.meetingFocus.error("Meeting Focus sync failed: \(error.localizedDescription, privacy: .private)")
+                self.model.lastError = self.userFacingError(error)
+                self.model.lastErrorRecovery = nil
+            }
+            self.meetingFocusSyncTask = nil
+            self.refreshUI()
         }
     }
 
@@ -1376,6 +1616,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             _ = try meetingFocusBridge.apply(.inactive)
             model.meetingFocusStatusText = ""
         } catch {
+            AppLog.meetingFocus.error("Failed to turn off managed Meeting Focus: \(error.localizedDescription, privacy: .private)")
             model.lastError = userFacingError(error)
             model.lastErrorRecovery = nil
         }
@@ -1394,33 +1635,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         do {
             if model.connectionState.isConnected {
                 try await authClient.ensureGmailLabelsScope()
+                model.gmailError = nil
+                model.gmailErrorRecovery = nil
                 await refreshGmailUnread()
             }
         } catch {
             model.gmailUnreadCount = nil
-            model.mailBadgeEnabled = true
-            model.lastError = userFacingError(error)
-            model.lastErrorRecovery = gmailRecoveryAction(for: error)
+            model.mailBadgeEnabled = false
+            model.gmailError = gmailUserFacingError(error)
+            model.gmailErrorRecovery = gmailRecoveryAction(for: error)
             refreshUI()
         }
     }
 
-    private func refreshGmailUnread() async {
+    @discardableResult
+    private func refreshGmailUnread() async -> Int? {
+        // Only a newly completed request is valid evidence for unread
+        // reconciliation. Returning the cached count here could make a failed
+        // request look like a stable result.
+        guard !isRefreshingGmail else { return nil }
+        isRefreshingGmail = true
+        defer { isRefreshingGmail = false }
+
         guard model.mailBadgeEnabled, model.connectionState.isConnected else {
             model.gmailUnreadCount = nil
-            return
+            return nil
         }
 
         do {
             let unreadCount = try await gmailService.loadInboxUnreadCount()
             model.gmailUnreadCount = unreadCount
-            model.lastError = nil
-            model.lastErrorRecovery = nil
+            model.gmailError = nil
+            model.gmailErrorRecovery = nil
             refreshUI()
+            return unreadCount
         } catch {
-            model.lastError = userFacingError(error)
-            model.lastErrorRecovery = gmailRecoveryAction(for: error)
+            AppLog.gmail.error("Gmail unread refresh failed: \(error.localizedDescription, privacy: .private)")
+            let recovery = gmailRecoveryAction(for: error)
+            model.gmailError = gmailUserFacingError(error)
+            model.gmailErrorRecovery = recovery
+            if recovery == .gmailPermission {
+                model.mailBadgeEnabled = false
+                model.gmailUnreadCount = nil
+                refreshScheduler.cancelGmailUnreadReconciliation()
+            }
             refreshUI()
+            return nil
         }
     }
 
@@ -1428,8 +1688,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         guard model.connectionState.isConnected else { return }
         popover.performClose(nil)
         model.mailBadgeEnabled = true
-        model.lastError = nil
-        model.lastErrorRecovery = nil
+        model.gmailError = nil
+        model.gmailErrorRecovery = nil
         model.isBusy = true
         refreshUI()
 
@@ -1535,6 +1795,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             refreshUI()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
+            refreshScheduler.requestRemoteRefresh(.popoverOpened)
         }
     }
 
@@ -1550,46 +1811,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         NSApp.terminate(nil)
     }
 
-    private func applyGoogleSetup(_ config: GoogleSetupConfig) -> GoogleSetupResult {
-        do {
-            let normalized = try GoogleSetupConfig.normalized(
-                clientID: config.clientID,
-                reversedClientID: config.reversedClientID
-            )
-            let current = GoogleSetupConfig.current
-            if current.clientID == normalized.clientID,
-               current.resolvedReversedClientID == normalized.resolvedReversedClientID {
-                authClient.configure(clientID: normalized.clientID)
-                model.connectionState = authClient.connectionState()
-                refreshUI()
-                return .success("Setup is already saved. You can sign in now.")
-            }
-            try GoogleAppBundleSetup.apply(config: normalized)
-            authClient.configure(clientID: normalized.clientID)
-            model.connectionState = authClient.connectionState()
-            refreshUI()
-            relaunchApp()
-            return .success("Saved setup. GWS Menu will restart now.")
-        } catch {
-            return .failure(error.localizedDescription)
-        }
-    }
-
     private func userFacingError(_ error: Error) -> String {
         let message = error.localizedDescription
         let lowercased = message.lowercased()
-        if isGmailSetupError(error) {
-            return "Gmail unread badge could not be enabled. Enable Gmail API in Google Cloud, then try again."
+        if let apiError = error as? GoogleAPIError {
+            if apiError.service == .gmail {
+                return gmailUserFacingError(apiError)
+            }
+            if apiError.isUnavailableInBuild {
+                return text.s(
+                    "Calendar is unavailable in this build.",
+                    "이 빌드에서는 캘린더를 사용할 수 없습니다."
+                )
+            }
+            if apiError.requiresReconnect {
+                return text.s(
+                    "Google connection expired. Connect again.",
+                    "Google 연결이 만료되었습니다. 다시 연결하세요."
+                )
+            }
+            if apiError.isTransient {
+                return text.s(
+                    "Calendar refresh will retry shortly.",
+                    "캘린더를 잠시 후 다시 확인합니다."
+                )
+            }
         }
-        if isGmailPermissionError(error) {
-            return "Gmail unread badge needs permission. Click Allow, then approve Gmail unread-count access."
+        if case AppError.gmailScopeNotGranted = error {
+            return gmailUserFacingError(error)
         }
         if lowercased.contains("client_secret") || lowercased.contains("invalid_client") {
-            let bundleID = Bundle.main.bundleIdentifier ?? "io.github.gwsmenu.app"
-            return "This looks like a Web application OAuth client. Create an OAuth client for Apple's native app type in Google Cloud, use bundle ID \(bundleID), then paste that Client ID in Open Setup. GWS Menu does not use a client secret."
+            return text.s(
+                "Google connection is unavailable in this build.",
+                "이 빌드에서는 Google에 연결할 수 없습니다."
+            )
         }
         if lowercased.contains("redirect_uri_mismatch") || lowercased.contains("url scheme") {
-            return "Google could not return to GWS Menu. Open Setup and save the generated URL scheme, then try signing in again."
+            return text.s(
+                "Google could not return to GWS Menu. Install the latest build.",
+                "Google이 GWS Menu로 돌아오지 못했습니다. 최신 빌드를 설치하세요."
+            )
+        }
+        if lowercased.contains("homebrew") {
+            return text.s(
+                "Homebrew is required to install Microsoft 365 CLI.",
+                "Microsoft 365 CLI 설치에 Homebrew가 필요합니다."
+            )
+        }
+        if (lowercased.contains("microsoft 365 cli") || lowercased.contains("m365")) &&
+            (lowercased.contains("install") || lowercased.contains("npm") || lowercased.contains("node.js")) {
+            return text.s(
+                "Microsoft 365 CLI installation failed. Check Homebrew/Node.js, then retry.",
+                "Microsoft 365 CLI 설치에 실패했습니다. Homebrew와 Node.js를 확인한 뒤 다시 시도하세요."
+            )
         }
         if lowercased.contains("microsoft") || lowercased.contains("graph") || lowercased.contains("teams") ||
             lowercased.contains("presencereadwrite") || lowercased.contains("presence.readwrite") {
@@ -1611,10 +1885,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             return "Teams status could not be updated."
         }
         if lowercased.contains("keychain") {
-            return "Google Sign-In could not read or save credentials. Open Setup, save the current Client ID once, then try Sign in again."
+            return text.s(
+                "Google credentials could not be read from Keychain. Connect again.",
+                "Keychain에서 Google 로그인을 읽지 못했습니다. 다시 연결하세요."
+            )
         }
         if lowercased.contains("gmail") || lowercased.contains("mail") {
-            return "Gmail unread badge could not be enabled. Enable Gmail API in Google Cloud, then try the Inbox unread badge setting again."
+            return gmailUserFacingError(error)
         }
         if lowercased.contains("notification") {
             return "macOS notification permission is off. Meeting alerts cannot be scheduled."
@@ -1631,16 +1908,83 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         return message
     }
 
-    private func gmailRecoveryAction(for error: Error) -> ErrorRecoveryAction {
-        isGmailSetupError(error) ? .googleSetup : .gmailPermission
+    private func googleRecoveryAction(for error: Error) -> ErrorRecoveryAction? {
+        if let apiError = error as? GoogleAPIError {
+            return apiError.requiresReconnect ? .googleConnection : nil
+        }
+        switch error {
+        case AppError.notSignedIn, AppError.calendarScopeNotGranted:
+            return .googleConnection
+        default:
+            let message = error.localizedDescription.lowercased()
+            return message.contains("access_denied") || message.contains("invalid_grant")
+                ? .googleConnection
+                : nil
+        }
     }
 
-    private func isGmailSetupError(_ error: Error) -> Bool {
-        let message = error.localizedDescription
-        return message.localizedCaseInsensitiveContains("accessNotConfigured") ||
-            message.localizedCaseInsensitiveContains("api has not been used") ||
-            message.localizedCaseInsensitiveContains("service_disabled") ||
-            message.localizedCaseInsensitiveContains("gmail api") && message.localizedCaseInsensitiveContains("disabled")
+    private func gmailRecoveryAction(for error: Error) -> ErrorRecoveryAction? {
+        if let apiError = error as? GoogleAPIError {
+            if apiError.requiresReconnect {
+                return .googleConnection
+            }
+            return apiError.requiresAdditionalScope ? .gmailPermission : nil
+        }
+        if case AppError.notSignedIn = error {
+            return .googleConnection
+        }
+        let message = error.localizedDescription.lowercased()
+        if message.contains("invalid_grant") ||
+            message.contains("not signed in") ||
+            message.contains("keychain") {
+            return .googleConnection
+        }
+        return isGmailPermissionError(error) ? .gmailPermission : nil
+    }
+
+    private func gmailUserFacingError(_ error: Error) -> String {
+        if let apiError = error as? GoogleAPIError {
+            if apiError.isUnavailableInBuild {
+                return text.s(
+                    "Gmail unread count is unavailable in this build.",
+                    "이 빌드에서는 Gmail 안 읽은 개수를 사용할 수 없습니다."
+                )
+            }
+            if apiError.requiresReconnect {
+                return text.s(
+                    "Google connection expired. Connect again.",
+                    "Google 연결이 만료되었습니다. 다시 연결하세요."
+                )
+            }
+            if apiError.requiresAdditionalScope {
+                return text.s(
+                    "Allow Gmail unread-count access.",
+                    "Gmail 안 읽은 개수 접근을 허용하세요."
+                )
+            }
+            if apiError.isTransient {
+                return text.s(
+                    "Gmail unread count will retry shortly.",
+                    "Gmail 안 읽은 개수를 잠시 후 다시 확인합니다."
+                )
+            }
+        }
+        if gmailRecoveryAction(for: error) == .googleConnection {
+            return text.s(
+                "Google connection expired. Connect again.",
+                "Google 연결이 만료되었습니다. 다시 연결하세요."
+            )
+        }
+        if isGmailPermissionError(error) {
+            return text.s(
+                "Allow Gmail unread-count access.",
+                "Gmail 안 읽은 개수 접근을 허용하세요."
+            )
+        }
+        return text.s(
+            "Gmail unread count could not refresh.",
+            "Gmail 안 읽은 개수를 갱신하지 못했습니다."
+        )
     }
 
     private func isGmailPermissionError(_ error: Error) -> Bool {
@@ -1654,21 +1998,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             message.localizedCaseInsensitiveContains("cancel")
     }
 
-    private func relaunchApp() {
-        let bundlePath = Bundle.main.bundleURL.path.shellQuoted
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/bin/sh")
-        task.arguments = ["-c", "sleep 0.6; /usr/bin/open -n \(bundlePath)"]
-        try? task.run()
-        NSApp.terminate(nil)
-    }
 }
 
 enum PopoverScreen {
     case home
     case appSettings
     case workspaceSettings
-    case googleSetup
+}
+
+private struct HomeContentHeightPreferenceKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
 }
 
 struct GWSMenuPopover: View {
@@ -1677,26 +2020,30 @@ struct GWSMenuPopover: View {
     @State private var editorID = UUID()
     @State private var isWorkspaceExpanded = false
     @State private var isUpcomingExpanded = false
+    @State private var homeContentHeight = PopoverLayout.minimumHomeHeight - PopoverLayout.homeChromeHeight
+    @State private var settingsSessionHeight: CGFloat?
+    let maximumHeight: CGFloat
+    let onPreferredHeightChange: (CGFloat) -> Void
     let onSignIn: () -> Void
     let onRefresh: () -> Void
     let onSignOut: () -> Void
-    let onResetGoogleSetup: () -> Void
     let onDismissSetupChecklist: () -> Void
     let onEnableCalendarAlerts: () -> Void
     let onEnableGmailBadge: () -> Void
     let onEnableLaunchAtLogin: () -> Void
     let onUpdateLanguage: (AppLanguage) -> Void
-    let onApplyGoogleSetup: (GoogleSetupConfig) -> GoogleSetupResult
     let onUpdateWorkspaceApps: ([WorkspaceApp]) -> Void
     let onUpdateAlertLeadMinutes: (Int) -> Void
     let onUpdateCalendarNotifications: (Bool) -> Void
     let onSendTestCalendarNotification: () -> Void
     let onUpdateMeetingFocus: (Bool) -> Bool
     let onApproveMeetingFocus: () -> Void
+    let onInstallMicrosoftCLI: () -> Void
     let onConnectMicrosoftTeams: () -> Void
     let onSignOutMicrosoftTeams: () -> Void
     let onUpdateTeamsPresence: (Bool) -> Bool
     let onUpdateTeamsCallBlock: (Bool) -> Bool
+    let onUpdateTeamsControlScrollBlock: (Bool) -> Bool
     let onRefreshTeamsCallBlockPermissions: () -> Void
     let onUpdateMailBadge: (Bool) -> Void
     let onUpdateLaunchAtLogin: (Bool) -> Void
@@ -1710,8 +2057,14 @@ struct GWSMenuPopover: View {
             case .appSettings:
                 AppSettingsView(
                     connectionState: model.connectionState,
+                    isBusy: model.isBusy,
+                    errorMessage: model.lastError,
+                    errorRecovery: model.lastErrorRecovery,
+                    gmailErrorMessage: model.gmailError,
+                    gmailErrorRecovery: model.gmailErrorRecovery,
                     initialAlertLeadMinutes: model.alertLeadMinutes,
                     initialCalendarNotificationsEnabled: model.calendarNotificationsEnabled,
+                    currentCalendarNotificationsEnabled: model.calendarNotificationsEnabled,
                     initialLanguage: model.language,
                     currentLanguage: model.language,
                     initialMeetingFocusEnabled: model.meetingFocusEnabled,
@@ -1722,16 +2075,22 @@ struct GWSMenuPopover: View {
                     currentTeamsPresenceEnabled: model.teamsPresenceEnabled,
                     initialTeamsCallBlockEnabled: model.teamsCallBlockEnabled,
                     currentTeamsCallBlockEnabled: model.teamsCallBlockEnabled,
+                    initialTeamsControlScrollBlockEnabled: model.teamsControlScrollBlockEnabled,
+                    currentTeamsControlScrollBlockEnabled: model.teamsControlScrollBlockEnabled,
                     teamsCallBlockPermissionPending: model.teamsCallBlockPermissionPending,
                     teamsCallBlockStatusText: model.teamsCallBlockStatusText,
                     teamsPresenceStatusText: model.teamsPresenceStatusText,
                     microsoftConnectionState: model.teamsConnectionState,
                     microsoftSetupConfig: model.teamsSetupConfig,
+                    microsoftTeamsOperation: model.teamsOperation,
                     initialMailBadgeEnabled: model.mailBadgeEnabled,
+                    currentMailBadgeEnabled: model.mailBadgeEnabled,
                     initialLaunchAtLoginEnabled: model.launchAtLoginEnabled,
-                    onDone: { screen = .home },
+                    currentLaunchAtLoginEnabled: model.launchAtLoginEnabled,
+                    onDone: showHome,
+                    onRecoverError: recoverFromError,
+                    onSignIn: onSignIn,
                     onSignOut: onSignOut,
-                    onResetGoogleSetup: onResetGoogleSetup,
                     onOpenNotificationSettings: openNotificationSettings,
                     onOpenGitHub: openGitHub,
                     onUpdateLanguage: onUpdateLanguage,
@@ -1740,10 +2099,12 @@ struct GWSMenuPopover: View {
                     onSendTestCalendarNotification: onSendTestCalendarNotification,
                     onUpdateMeetingFocus: onUpdateMeetingFocus,
                     onApproveMeetingFocus: onApproveMeetingFocus,
+                    onInstallMicrosoftCLI: onInstallMicrosoftCLI,
                     onConnectMicrosoftTeams: onConnectMicrosoftTeams,
                     onSignOutMicrosoftTeams: onSignOutMicrosoftTeams,
                     onUpdateTeamsPresence: onUpdateTeamsPresence,
                     onUpdateTeamsCallBlock: onUpdateTeamsCallBlock,
+                    onUpdateTeamsControlScrollBlock: onUpdateTeamsControlScrollBlock,
                     onRefreshTeamsCallBlockPermissions: onRefreshTeamsCallBlockPermissions,
                     onUpdateMailBadge: onUpdateMailBadge,
                     onUpdateLaunchAtLogin: onUpdateLaunchAtLogin
@@ -1752,27 +2113,50 @@ struct GWSMenuPopover: View {
             case .workspaceSettings:
                 WorkspaceAppsEditor(
                     initialApps: model.workspaceApps,
-                    onDone: { screen = .home },
+                    onDone: showHome,
                     onUpdateApps: onUpdateWorkspaceApps
                 )
                 .id(editorID)
-            case .googleSetup:
-                GoogleSetupView(
-                    initialConfig: GoogleSetupConfig.current,
-                    onCancel: { screen = .home },
-                    onApply: onApplyGoogleSetup,
-                    onOpenURL: onOpenURL
-                )
             }
         }
-        .frame(width: 420, height: 590)
+        .frame(width: PopoverLayout.width)
+        .frame(maxHeight: .infinity, alignment: .top)
         .popoverSurface()
+        .onAppear {
+            onPreferredHeightChange(preferredHeight)
+        }
+        .onChange(of: preferredHeight) { _, height in
+            onPreferredHeightChange(height)
+        }
+    }
+
+    private var preferredHeight: CGFloat {
+        switch screen {
+        case .home:
+            return homePreferredHeight
+        case .appSettings:
+            return settingsSessionHeight
+                ?? min(maximumHeight, max(homePreferredHeight, PopoverLayout.settingsMinimumHeight))
+        case .workspaceSettings:
+            return maximumHeight
+        }
+    }
+
+    private var homePreferredHeight: CGFloat {
+        min(
+            maximumHeight,
+            max(
+                PopoverLayout.minimumHomeHeight,
+                PopoverLayout.quantized(homeContentHeight + PopoverLayout.homeChromeHeight)
+            )
+        )
     }
 
     private var homeView: some View {
         VStack(spacing: 0) {
             HeaderView(
                 connectionState: model.connectionState,
+                language: model.language,
                 isBusy: model.isBusy,
                 onRefresh: onRefresh,
                 onOpenSettings: openAppSettings
@@ -1780,27 +2164,32 @@ struct GWSMenuPopover: View {
 
             MenuDivider()
 
-            WorkspaceGrid(
-                apps: model.workspaceApps.filter(\.isEnabled),
-                gmailUnreadCount: model.mailBadgeEnabled ? model.gmailUnreadCount : nil,
-                isExpanded: isWorkspaceExpanded,
-                onToggleExpanded: { isWorkspaceExpanded.toggle() },
-                onManageApps: openWorkspaceSettings,
-                onOpenURL: onOpenURL
-            )
-            .padding(.horizontal, 16)
-            .padding(.top, 14)
-            .padding(.bottom, 12)
-
-            MenuDivider()
-
             ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    if let lastError = model.lastError {
+                VStack(alignment: .leading, spacing: 0) {
+                    WorkspaceGrid(
+                        apps: model.workspaceApps.filter(\.isEnabled),
+                        language: model.language,
+                        gmailUnreadCount: model.mailBadgeEnabled ? model.gmailUnreadCount : nil,
+                        isExpanded: isWorkspaceExpanded,
+                        onToggleExpanded: { isWorkspaceExpanded.toggle() },
+                        onManageApps: openWorkspaceSettings,
+                        onOpenURL: onOpenURL
+                    )
+                    .padding(.horizontal, 16)
+                    .padding(.top, 14)
+                    .padding(.bottom, 12)
+
+                    MenuDivider()
+
+                    VStack(alignment: .leading, spacing: 14) {
+                    if let lastError = model.lastError ?? model.gmailError {
+                        let recovery = model.lastError == nil
+                            ? model.gmailErrorRecovery
+                            : model.lastErrorRecovery
                         ErrorBanner(
                             message: lastError,
-                            actionTitle: model.lastErrorRecovery?.buttonTitle,
-                            action: model.lastErrorRecovery.map { recovery in
+                            actionTitle: recovery?.buttonTitle,
+                            action: recovery.map { recovery in
                                 { recoverFromError(recovery) }
                             }
                         )
@@ -1809,9 +2198,10 @@ struct GWSMenuPopover: View {
                     if !model.connectionState.isConnected || model.events.isEmpty {
                         PrimaryCalendarCard(
                             connectionState: model.connectionState,
+                            language: model.language,
                             isBusy: model.isBusy,
-                            onSignIn: onSignIn,
-                            onShowSetup: openGoogleSetup
+                            includesGmail: model.mailBadgeEnabled,
+                            onSignIn: onSignIn
                         )
                     }
 
@@ -1835,13 +2225,29 @@ struct GWSMenuPopover: View {
 
                     UpcomingEventsView(
                         events: model.events,
+                        language: model.language,
                         now: model.now,
                         isExpanded: isUpcomingExpanded,
                         onToggleExpanded: { isUpcomingExpanded.toggle() },
                         onOpenURL: onOpenURL
                     )
+                    }
+                    .padding(16)
                 }
-                .padding(16)
+                .background {
+                    GeometryReader { proxy in
+                        Color.clear.preference(
+                            key: HomeContentHeightPreferenceKey.self,
+                            value: proxy.size.height
+                        )
+                    }
+                }
+            }
+            .frame(maxHeight: .infinity)
+            .onPreferenceChange(HomeContentHeightPreferenceKey.self) { height in
+                let measuredHeight = PopoverLayout.quantized(height)
+                guard measuredHeight > 0, abs(homeContentHeight - measuredHeight) >= 4 else { return }
+                homeContentHeight = measuredHeight
             }
 
         }
@@ -1861,26 +2267,41 @@ struct GWSMenuPopover: View {
 
     private func openAppSettings() {
         editorID = UUID()
-        screen = .appSettings
+        settingsSessionHeight = min(
+            maximumHeight,
+            max(homePreferredHeight, PopoverLayout.settingsMinimumHeight)
+        )
+        setScreen(.appSettings)
     }
 
     private func openWorkspaceSettings() {
         editorID = UUID()
-        screen = .workspaceSettings
+        setScreen(.workspaceSettings)
     }
 
-    private func openGoogleSetup() {
-        screen = .googleSetup
+    private func showHome() {
+        settingsSessionHeight = nil
+        setScreen(.home)
+    }
+
+    private func setScreen(_ newScreen: PopoverScreen) {
+        var transaction = Transaction()
+        transaction.animation = nil
+        withTransaction(transaction) {
+            screen = newScreen
+        }
     }
 
     private func recoverFromError(_ recovery: ErrorRecoveryAction) {
         switch recovery {
-        case .googleSetup:
-            openGoogleSetup()
+        case .googleConnection:
+            onSignIn()
         case .gmailPermission:
             onEnableGmailBadge()
         case .notificationSettings:
             openNotificationSettings()
+        case .loginItemsSettings:
+            openLoginItemsSettings()
         }
     }
 
@@ -1891,6 +2312,11 @@ struct GWSMenuPopover: View {
 
     private func openGitHub() {
         guard let url = URL(string: "https://github.com/hyunn515/gws-menu-app") else { return }
+        onOpenURL(url)
+    }
+
+    private func openLoginItemsSettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension") else { return }
         onOpenURL(url)
     }
 
@@ -1985,6 +2411,7 @@ struct MenuDivider: View {
 
 struct HeaderView: View {
     let connectionState: ConnectionState
+    let language: AppLanguage
     let isBusy: Bool
     let onRefresh: () -> Void
     let onOpenSettings: () -> Void
@@ -2000,7 +2427,7 @@ struct HeaderView: View {
             Text("GWS Menu")
                 .font(.system(size: 13, weight: .semibold))
 
-            Text(connectionState.accountLine)
+            Text(text.googleAccountLine(connectionState))
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
@@ -2013,55 +2440,59 @@ struct HeaderView: View {
                     .frame(width: 24, height: 24)
             }
 
-            IconButton(symbolName: "arrow.clockwise", title: "Refresh", action: onRefresh)
+            IconButton(symbolName: "arrow.clockwise", title: text.s("Refresh", "새로고침"), action: onRefresh)
                 .disabled(!connectionState.isConnected || isBusy)
-            IconButton(symbolName: "gearshape", title: "Settings", action: onOpenSettings)
+            IconButton(symbolName: "gearshape", title: text.settings, action: onOpenSettings)
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 7)
+        .frame(height: PopoverLayout.headerHeight)
     }
+
+    private var text: AppText { AppText(language: language) }
 }
 
 struct PrimaryCalendarCard: View {
     let connectionState: ConnectionState
+    let language: AppLanguage
     let isBusy: Bool
+    let includesGmail: Bool
     let onSignIn: () -> Void
-    let onShowSetup: () -> Void
+    private var text: AppText { AppText(language: language) }
 
     var body: some View {
         switch connectionState {
         case .loading:
-            StatusCard(symbolName: "hourglass", title: "Loading Calendar", message: "Checking saved Google sign-in.", actionTitle: nil, action: nil)
+            StatusCard(symbolName: "hourglass", title: text.s("Loading calendar", "캘린더 확인 중"), message: text.s("Checking saved sign-in.", "저장된 로그인을 확인합니다."), actionTitle: nil, action: nil)
         case .missingBundleConfig:
-            AuthStatusCard(
-                symbolName: "wrench.and.screwdriver",
-                title: "Google setup needed",
-                message: "Open Setup, copy this app's Bundle ID into Google Cloud, then paste the Client ID back here.",
-                primaryTitle: "Open Setup",
-                primarySystemImage: "slider.horizontal.3",
-                primaryAction: onShowSetup,
-                isPrimaryDisabled: false,
-                secondaryTitle: nil,
-                secondarySystemImage: nil,
-                secondaryAction: nil,
-                footnote: "No client secret is used or stored."
+            StatusCard(
+                symbolName: "exclamationmark.triangle",
+                title: text.s("Google unavailable", "Google 연결 불가"),
+                message: text.s(
+                    "This build is missing its Google connection.",
+                    "이 빌드에 Google 연결 정보가 없습니다."
+                ),
+                actionTitle: nil,
+                action: nil
             )
         case .signedOut:
             AuthStatusCard(
                 symbolName: "person.crop.circle.badge.plus",
-                title: "Connect Google Calendar",
-                message: isBusy ? "Waiting for Google sign-in to finish." : "Sign in to read your primary calendar. You can repair setup if Google rejects the client.",
-                primaryTitle: isBusy ? "Signing in" : "Sign in",
+                title: text.s("Connect Google", "Google 연결"),
+                message: isBusy
+                    ? text.s("Waiting for Google.", "Google 로그인 대기 중…")
+                    : includesGmail
+                        ? text.s("Calendar events and Gmail unread count.", "캘린더 일정과 Gmail 안 읽은 개수를 확인합니다.")
+                        : text.s("Calendar events for the next 7 days.", "앞으로 7일의 캘린더 일정을 확인합니다."),
+                primaryTitle: isBusy ? text.s("Connecting", "연결 중…") : text.s("Connect", "연결"),
                 primarySystemImage: "person.crop.circle.badge.plus",
                 primaryAction: onSignIn,
                 isPrimaryDisabled: isBusy,
-                secondaryTitle: "Setup",
-                secondarySystemImage: "gearshape",
-                secondaryAction: onShowSetup,
-                footnote: "Read-only calendar access."
+                footnote: includesGmail
+                    ? text.s("No mail content", "메일 내용 미사용")
+                    : text.s("Read only", "읽기 전용")
             )
         case .connected:
-            StatusCard(symbolName: "checkmark.circle", title: "No Upcoming Meetings", message: isBusy ? "Refreshing your calendar." : "Your calendar is clear for the next 7 days.", actionTitle: nil, action: nil)
+            StatusCard(symbolName: "checkmark.circle", title: text.s("No upcoming meetings", "예정된 회의 없음"), message: isBusy ? text.s("Refreshing calendar.", "캘린더 새로고침 중…") : text.s("Nothing scheduled for 7 days.", "7일 내 일정이 없습니다."), actionTitle: nil, action: nil)
         }
     }
 }
@@ -2074,9 +2505,6 @@ struct AuthStatusCard: View {
     let primarySystemImage: String
     let primaryAction: () -> Void
     let isPrimaryDisabled: Bool
-    let secondaryTitle: String?
-    let secondarySystemImage: String?
-    let secondaryAction: (() -> Void)?
     let footnote: String?
 
     var body: some View {
@@ -2107,15 +2535,6 @@ struct AuthStatusCard: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(isPrimaryDisabled)
-
-                if let secondaryTitle, let secondarySystemImage, let secondaryAction {
-                    Button {
-                        secondaryAction()
-                    } label: {
-                        Label(secondaryTitle, systemImage: secondarySystemImage)
-                    }
-                    .buttonStyle(.bordered)
-                }
 
                 Spacer()
 
@@ -2198,7 +2617,7 @@ struct FinishSetupCard: View {
                     )
                     FinishSetupOptionRow(
                         title: "Gmail badge",
-                        subtitle: "Inbox unread count. Refreshes faster for two minutes after opening Gmail.",
+                        subtitle: "Inbox unread count. Rechecks briefly after opening Gmail.",
                         systemImage: "envelope.badge",
                         isEnabled: mailBadgeEnabled,
                         isBusy: isBusy,
@@ -2470,10 +2889,12 @@ struct SettingsActionRow: View {
 
 struct UpcomingEventsView: View {
     let events: [MeetingEvent]
+    let language: AppLanguage
     let now: Date
     let isExpanded: Bool
     let onToggleExpanded: () -> Void
     let onOpenURL: (URL) -> Void
+    private var text: AppText { AppText(language: language) }
 
     private var visibleEvents: [MeetingEvent] {
         MenuSectionVisibility.visibleUpcomingEvents(events, now: now, isExpanded: isExpanded)
@@ -2483,18 +2904,18 @@ struct UpcomingEventsView: View {
         if !events.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
-                    SectionTitle("Upcoming")
+                    SectionTitle(text.s("Upcoming", "다가오는 일정"))
                     Spacer()
                     IconButton(
                         symbolName: isExpanded ? "chevron.up" : "chevron.down",
-                        title: isExpanded ? "Show today only" : "Show this week",
+                        title: isExpanded ? text.s("Show today only", "오늘만 보기") : text.s("Show this week", "이번 주 보기"),
                         action: onToggleExpanded
                     )
                     .frame(width: 24, height: 24)
                 }
 
                 if visibleEvents.isEmpty {
-                    Text(isExpanded ? "No meetings this week" : "No meetings today")
+                    Text(isExpanded ? text.s("No meetings this week", "이번 주 회의 없음") : text.s("No meetings today", "오늘 회의 없음"))
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -2503,7 +2924,7 @@ struct UpcomingEventsView: View {
                 } else {
                     VStack(spacing: 8) {
                         ForEach(visibleEvents, id: \.id) { event in
-                            EventRow(event: event, now: now, onOpenURL: onOpenURL)
+                            EventRow(event: event, now: now, language: language, onOpenURL: onOpenURL)
                         }
                     }
                 }
@@ -2515,6 +2936,7 @@ struct UpcomingEventsView: View {
 struct EventRow: View {
     let event: MeetingEvent
     let now: Date
+    let language: AppLanguage
     let onOpenURL: (URL) -> Void
     @Environment(\.colorScheme) private var colorScheme
     @State private var isShowingParticipants = false
@@ -2525,7 +2947,7 @@ struct EventRow: View {
                 Text(event.startTimeText)
                     .font(.system(size: 12, weight: .semibold))
                     .monospacedDigit()
-                Text(event.dayText(relativeTo: now))
+                Text(event.dayText(relativeTo: now, language: language))
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(.secondary)
             }
@@ -2610,7 +3032,10 @@ struct ParticipantPopover: View {
                     .foregroundStyle(.secondary)
             }
 
-            ParticipantList(participants: event.participants)
+            ScrollView {
+                ParticipantList(participants: event.participants)
+            }
+            .frame(maxHeight: 280)
         }
         .padding(10)
         .frame(width: 260)
@@ -2647,11 +3072,13 @@ struct ParticipantList: View {
 struct WorkspaceGrid: View {
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 8), count: 4)
     let apps: [WorkspaceApp]
+    let language: AppLanguage
     let gmailUnreadCount: Int?
     let isExpanded: Bool
     let onToggleExpanded: () -> Void
     let onManageApps: () -> Void
     let onOpenURL: (URL) -> Void
+    private var text: AppText { AppText(language: language) }
 
     private var visibleApps: [WorkspaceApp] {
         let visibleIDs = Set(MenuSectionVisibility.visibleWorkspaceIDs(
@@ -2665,17 +3092,17 @@ struct WorkspaceGrid: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                SectionTitle("Workspace")
+                SectionTitle(text.s("Workspace", "워크스페이스"))
                 Spacer()
                 if apps.count > MenuSectionVisibility.defaultWorkspaceColumns {
                     IconButton(
                         symbolName: isExpanded ? "chevron.up" : "chevron.down",
-                        title: isExpanded ? "Collapse workspace apps" : "Show all workspace apps",
+                        title: isExpanded ? text.s("Collapse apps", "앱 접기") : text.s("Show all apps", "모든 앱 보기"),
                         action: onToggleExpanded
                     )
                     .frame(width: 24, height: 24)
                 }
-                IconButton(symbolName: "slider.horizontal.3", title: "Manage workspace apps", action: onManageApps)
+                IconButton(symbolName: "slider.horizontal.3", title: text.s("Manage apps", "앱 관리"), action: onManageApps)
                     .frame(width: 24, height: 24)
             }
 
@@ -2748,450 +3175,61 @@ struct WorkspaceProductIcon: View {
     }
 }
 
-struct GoogleSetupView: View {
-    @State private var clientID: String
-    @State private var reversedClientID: String
-    @State private var feedback: GoogleSetupResult?
-    @State private var isNormalizingClientID = false
-    let onCancel: () -> Void
-    let onApply: (GoogleSetupConfig) -> GoogleSetupResult
-    let onOpenURL: (URL) -> Void
+private enum AppSettingsSection: String, CaseIterable, Identifiable {
+    case general
+    case notifications
+    case teams
+    case account
 
-    init(
-        initialConfig: GoogleSetupConfig,
-        onCancel: @escaping () -> Void,
-        onApply: @escaping (GoogleSetupConfig) -> GoogleSetupResult,
-        onOpenURL: @escaping (URL) -> Void
-    ) {
-        _clientID = State(initialValue: initialConfig.clientID)
-        _reversedClientID = State(initialValue: initialConfig.reversedClientID)
-        self.onCancel = onCancel
-        self.onApply = onApply
-        self.onOpenURL = onOpenURL
-    }
+    var id: String { rawValue }
 
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                IconButton(symbolName: "chevron.left", title: "Back", action: onCancel)
-                Text("Google Setup")
-                    .font(.system(size: 17, weight: .semibold))
-                Spacer()
-                IconButton(symbolName: "questionmark.circle", title: "Open setup guide") {
-                    if let url = URL(string: "https://console.cloud.google.com/apis/credentials") {
-                        onOpenURL(url)
-                    }
-                }
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
-
-            MenuDivider()
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Connect Google Calendar")
-                            .font(.system(size: 16, weight: .semibold))
-                        Text("Follow the buttons in order. GWS Menu only needs an Apple native OAuth Client ID; it never asks for or stores a client secret.")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-
-                    VStack(alignment: .leading, spacing: 8) {
-                        SetupActionStep(
-                            number: "1",
-                            title: "Enable Calendar API",
-                            text: "Open the API page, choose your Google Cloud project, then click Enable if it is not already enabled.",
-                            buttonTitle: "Open API",
-                            systemImage: "checkmark.shield"
-                        ) {
-                            openSetupURL("https://console.cloud.google.com/apis/library/calendar-json.googleapis.com")
-                        }
-
-                        SetupActionStep(
-                            number: "2",
-                            title: "Gmail API for unread badge",
-                            text: "Optional. Enable this only if you want an unread Inbox count on the Gmail tile.",
-                            buttonTitle: "Open Gmail API",
-                            systemImage: "envelope.badge"
-                        ) {
-                            openSetupURL("https://console.cloud.google.com/apis/library/gmail.googleapis.com")
-                        }
-
-                        SetupActionStep(
-                            number: "3",
-                            title: "Create Apple app credential",
-                            text: "Open OAuth client creation. In Google Cloud, choose application type iOS; that is Google's Apple native app type for this macOS sign-in flow.",
-                            buttonTitle: "Open OAuth Client",
-                            systemImage: "key"
-                        ) {
-                            openSetupURL("https://console.cloud.google.com/apis/credentials/oauthclient")
-                        }
-
-                        SetupActionStep(
-                            number: "4",
-                            title: "Consent screen if asked",
-                            text: "If Google blocks OAuth creation, open the consent screen, choose Internal for your Workspace org or Testing for personal use, then add yourself as a test user.",
-                            buttonTitle: "Open Consent",
-                            systemImage: "person.badge.shield.checkmark"
-                        ) {
-                            openSetupURL("https://console.cloud.google.com/apis/credentials/consent")
-                        }
-                    }
-
-                    CopyableSetupInfoRow(
-                        label: "App Bundle ID",
-                        value: bundleID,
-                        detail: "Paste this into Google Cloud's Bundle ID field."
-                    )
-
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Client ID")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(.secondary)
-                        HStack(spacing: 6) {
-                            TextField("1234567890-abc.apps.googleusercontent.com or credential JSON", text: $clientID)
-                                .textFieldStyle(.roundedBorder)
-                                .onChange(of: clientID) { _, newValue in
-                                    if isNormalizingClientID {
-                                        isNormalizingClientID = false
-                                        updateURLScheme(from: newValue, replacingExisting: true)
-                                        return
-                                    }
-                                    handleClientIDChange(newValue)
-                                }
-                            Button {
-                                pasteClientID()
-                            } label: {
-                                Label("Paste", systemImage: "doc.on.clipboard")
-                            }
-                        }
-                    }
-
-                    CopyableSetupInfoRow(
-                        label: "URL scheme",
-                        value: urlSchemePreview,
-                        detail: "Generated automatically from the Client ID. Save Setup writes it into this app bundle."
-                    )
-
-                    if let setupIssue {
-                        SetupFeedbackView(result: .failure(setupIssue))
-                    }
-
-                    if let feedback {
-                        SetupFeedbackView(result: feedback)
-                    }
-
-                    VStack(alignment: .leading, spacing: 8) {
-                        SetupStep(number: "5", text: "Copy the Client ID from Google Cloud, or download the credential file and paste its contents here.")
-                        SetupStep(number: "6", text: "Click Save Setup. GWS Menu updates this app, registers the URL scheme, restarts, then you can click Sign in.")
-                        SetupStep(number: "!", text: "If Google gives you a client secret, you created a Web application credential. Delete that and create the Apple/iOS client instead.")
-                    }
-                    .padding(10)
-                    .menuSurface()
-                }
-                .padding(14)
-            }
-
-            MenuDivider()
-
-            HStack {
-                Button("Cancel", action: onCancel)
-                Spacer()
-                Button {
-                    saveSetup()
-                } label: {
-                    Text("Save Setup")
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(!canSave)
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-        }
-    }
-
-    private var bundleID: String {
-        Bundle.main.bundleIdentifier ?? "io.github.gwsmenu.app"
-    }
-
-    private var urlSchemePreview: String {
-        clientIDCandidate.flatMap { GoogleSetupConfig.reversedClientID(from: $0) }
-            ?? reversedClientID.nilIfBlank
-            ?? "Generated from Client ID"
-    }
-
-    private var urlSchemeForApply: String {
-        clientIDCandidate.flatMap { GoogleSetupConfig.reversedClientID(from: $0) } ?? reversedClientID
-    }
-
-    private var clientIDCandidate: String? {
-        GoogleSetupConfig.extractedClientID(from: clientID)
-    }
-
-    private var setupIssue: String? {
-        let trimmed = clientID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        if GoogleSetupConfig.containsClientSecret(in: trimmed) {
-            return "This looks like a Web application credential because it contains a client secret. Create an Apple/iOS OAuth client instead."
-        }
-        if clientIDCandidate == nil {
-            return "Could not find a Google OAuth Client ID ending in .apps.googleusercontent.com."
-        }
-        return nil
-    }
-
-    private var canSave: Bool {
-        clientIDCandidate != nil && setupIssue == nil
-    }
-
-    private func pasteClientID() {
-        guard let pasted = NSPasteboard.general.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !pasted.isEmpty else {
-            return
-        }
-        ingestClientIDInput(pasted, fromPasteButton: true)
-    }
-
-    private func handleClientIDChange(_ newValue: String) {
-        feedback = nil
-        if GoogleSetupConfig.looksLikeCredentialDocument(newValue) {
-            ingestClientIDInput(newValue, fromPasteButton: false)
-            return
-        }
-        updateURLScheme(from: newValue, replacingExisting: false)
-    }
-
-    private func ingestClientIDInput(_ input: String, fromPasteButton: Bool) {
-        guard !GoogleSetupConfig.containsClientSecret(in: input) else {
-            feedback = .failure("This looks like a Web application credential. GWS Menu ignored the client secret. Create an Apple/iOS OAuth client and paste that Client ID.")
-            if !fromPasteButton {
-                replaceClientID("")
-            }
-            return
-        }
-        guard let extracted = GoogleSetupConfig.extractedClientID(from: input) else {
-            feedback = .failure(fromPasteButton ? "Could not find a Google OAuth Client ID in the clipboard." : "Could not find a Google OAuth Client ID in that credential text.")
-            return
-        }
-        replaceClientID(extracted)
-        updateURLScheme(from: extracted, replacingExisting: true)
-        if fromPasteButton || input != extracted {
-            feedback = .success("Client ID extracted. Review the URL scheme, then save setup.")
-        }
-    }
-
-    private func replaceClientID(_ value: String) {
-        if clientID != value {
-            isNormalizingClientID = true
-            clientID = value
-        } else {
-            updateURLScheme(from: value, replacingExisting: true)
-        }
-    }
-
-    private func saveSetup() {
-        guard let clientIDCandidate else {
-            feedback = .failure("Paste a Google OAuth Client ID first.")
-            return
-        }
-        feedback = onApply(GoogleSetupConfig(clientID: clientIDCandidate, reversedClientID: urlSchemeForApply))
-    }
-
-    private func openSetupURL(_ urlString: String) {
-        if let url = URL(string: urlString) {
-            onOpenURL(url)
-        }
-    }
-
-    private func updateURLScheme(from clientID: String, replacingExisting: Bool) {
-        guard replacingExisting || reversedClientID.nilIfBlank == nil || GoogleSetupConfig.reversedClientID(from: reversedClientID) == nil,
-              let generated = GoogleSetupConfig.reversedClientID(from: clientID) else {
-            return
-        }
-        reversedClientID = generated
-    }
-}
-
-struct SetupInfoRow: View {
-    let label: String
-    let value: String
-
-    var body: some View {
-        HStack {
-            Text(label)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.secondary)
-            Spacer()
-            Text(value)
-                .font(.system(size: 12, weight: .semibold))
-                .lineLimit(1)
-                .truncationMode(.middle)
-        }
-        .padding(10)
-        .menuSurface()
-    }
-}
-
-struct CopyableSetupInfoRow: View {
-    let label: String
-    let value: String
-    let detail: String?
-    @State private var didCopy = false
-
-    init(label: String, value: String, detail: String? = nil) {
-        self.label = label
-        self.value = value
-        self.detail = detail
-    }
-
-    var body: some View {
-        HStack(spacing: 8) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(label)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
-                Text(value)
-                    .font(.system(size: 12, weight: .semibold))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                if let detail {
-                    Text(detail)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-
-            Spacer()
-
-            Button {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(value, forType: .string)
-                didCopy = true
-            } label: {
-                Image(systemName: didCopy ? "checkmark" : "doc.on.doc")
-                    .frame(width: 24, height: 24)
-            }
-            .buttonStyle(.borderless)
-            .help("Copy \(label)")
-        }
-        .padding(10)
-        .menuSurface()
-        .onChange(of: value) { _, _ in
-            didCopy = false
-        }
-    }
-}
-
-struct SetupActionStep: View {
-    let number: String
-    let title: String
-    let text: String
-    let buttonTitle: String
-    let systemImage: String
-    let action: () -> Void
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Text(number)
-                .font(.system(size: 10, weight: .bold))
-                .foregroundStyle(.white)
-                .frame(width: 20, height: 20)
-                .background(Color.accentColor, in: Circle())
-
-            VStack(alignment: .leading, spacing: 5) {
-                Text(title)
-                    .font(.system(size: 12, weight: .semibold))
-                Text(text)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                Button(action: action) {
-                    Label(buttonTitle, systemImage: systemImage)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .help(buttonTitle)
-            }
-
-            Spacer(minLength: 0)
-        }
-        .padding(10)
-        .menuSurface()
-    }
-}
-
-struct SetupStep: View {
-    let number: String
-    let text: String
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Text(number)
-                .font(.system(size: 10, weight: .bold))
-                .foregroundStyle(.white)
-                .frame(width: 18, height: 18)
-                .background(Color.accentColor, in: Circle())
-            Text(text)
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-}
-
-struct SetupFeedbackView: View {
-    let result: GoogleSetupResult
-    @Environment(\.colorScheme) private var colorScheme
-
-    var body: some View {
-        let semanticColor = result.isSuccess ? Color.green : Color.orange
-        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
-
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: result.isSuccess ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                .foregroundStyle(semanticColor)
-            Text(result.message)
-                .font(.system(size: 12))
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer()
-        }
-        .padding(10)
-        .background(MenuAppearance.semanticFill(semanticColor, colorScheme: colorScheme), in: shape)
-        .overlay {
-            shape.stroke(MenuAppearance.semanticStroke(semanticColor, colorScheme: colorScheme), lineWidth: 1)
+    func title(_ text: AppText) -> String {
+        switch self {
+        case .general: return text.general
+        case .notifications: return text.notifications
+        case .teams: return text.teams
+        case .account: return text.account
         }
     }
 }
 
 struct AppSettingsView: View {
     let connectionState: ConnectionState
+    let isBusy: Bool
+    let errorMessage: String?
+    let errorRecovery: ErrorRecoveryAction?
+    let gmailErrorMessage: String?
+    let gmailErrorRecovery: ErrorRecoveryAction?
     let currentLanguage: AppLanguage
+    let currentCalendarNotificationsEnabled: Bool
     let currentMeetingFocusEnabled: Bool
     let meetingFocusApprovalPending: Bool
     let meetingFocusStatusText: String
     let currentTeamsPresenceEnabled: Bool
     let currentTeamsCallBlockEnabled: Bool
+    let currentTeamsControlScrollBlockEnabled: Bool
     let teamsCallBlockPermissionPending: Bool
     let teamsCallBlockStatusText: String
     let teamsPresenceStatusText: String
     let microsoftConnectionState: MicrosoftConnectionState
     let microsoftSetupConfig: MicrosoftSetupConfig
+    let microsoftTeamsOperation: MicrosoftTeamsOperation
+    let currentMailBadgeEnabled: Bool
+    let currentLaunchAtLoginEnabled: Bool
     @State private var draftAlertLeadMinutes: Int
     @State private var draftCalendarNotificationsEnabled: Bool
     @State private var draftLanguage: AppLanguage
     @State private var draftMeetingFocusEnabled: Bool
     @State private var draftTeamsPresenceEnabled: Bool
     @State private var draftTeamsCallBlockEnabled: Bool
+    @State private var draftTeamsControlScrollBlockEnabled: Bool
     @State private var draftMailBadgeEnabled: Bool
     @State private var draftLaunchAtLoginEnabled: Bool
-    @State private var showsResetGoogleSetupConfirmation = false
+    @State private var selectedSection = AppSettingsSection.general
     let onDone: () -> Void
+    let onRecoverError: (ErrorRecoveryAction) -> Void
+    let onSignIn: () -> Void
     let onSignOut: () -> Void
-    let onResetGoogleSetup: () -> Void
     let onOpenNotificationSettings: () -> Void
     let onOpenGitHub: () -> Void
     let onUpdateLanguage: (AppLanguage) -> Void
@@ -3200,18 +3238,26 @@ struct AppSettingsView: View {
     let onSendTestCalendarNotification: () -> Void
     let onUpdateMeetingFocus: (Bool) -> Bool
     let onApproveMeetingFocus: () -> Void
+    let onInstallMicrosoftCLI: () -> Void
     let onConnectMicrosoftTeams: () -> Void
     let onSignOutMicrosoftTeams: () -> Void
     let onUpdateTeamsPresence: (Bool) -> Bool
     let onUpdateTeamsCallBlock: (Bool) -> Bool
+    let onUpdateTeamsControlScrollBlock: (Bool) -> Bool
     let onRefreshTeamsCallBlockPermissions: () -> Void
     let onUpdateMailBadge: (Bool) -> Void
     let onUpdateLaunchAtLogin: (Bool) -> Void
 
     init(
         connectionState: ConnectionState,
+        isBusy: Bool,
+        errorMessage: String?,
+        errorRecovery: ErrorRecoveryAction?,
+        gmailErrorMessage: String?,
+        gmailErrorRecovery: ErrorRecoveryAction?,
         initialAlertLeadMinutes: Int,
         initialCalendarNotificationsEnabled: Bool,
+        currentCalendarNotificationsEnabled: Bool,
         initialLanguage: AppLanguage,
         currentLanguage: AppLanguage,
         initialMeetingFocusEnabled: Bool,
@@ -3222,16 +3268,22 @@ struct AppSettingsView: View {
         currentTeamsPresenceEnabled: Bool,
         initialTeamsCallBlockEnabled: Bool,
         currentTeamsCallBlockEnabled: Bool,
+        initialTeamsControlScrollBlockEnabled: Bool,
+        currentTeamsControlScrollBlockEnabled: Bool,
         teamsCallBlockPermissionPending: Bool,
         teamsCallBlockStatusText: String,
         teamsPresenceStatusText: String,
         microsoftConnectionState: MicrosoftConnectionState,
         microsoftSetupConfig: MicrosoftSetupConfig,
+        microsoftTeamsOperation: MicrosoftTeamsOperation,
         initialMailBadgeEnabled: Bool,
+        currentMailBadgeEnabled: Bool,
         initialLaunchAtLoginEnabled: Bool,
+        currentLaunchAtLoginEnabled: Bool,
         onDone: @escaping () -> Void,
+        onRecoverError: @escaping (ErrorRecoveryAction) -> Void,
+        onSignIn: @escaping () -> Void,
         onSignOut: @escaping () -> Void,
-        onResetGoogleSetup: @escaping () -> Void,
         onOpenNotificationSettings: @escaping () -> Void,
         onOpenGitHub: @escaping () -> Void,
         onUpdateLanguage: @escaping (AppLanguage) -> Void,
@@ -3240,10 +3292,12 @@ struct AppSettingsView: View {
         onSendTestCalendarNotification: @escaping () -> Void,
         onUpdateMeetingFocus: @escaping (Bool) -> Bool,
         onApproveMeetingFocus: @escaping () -> Void,
+        onInstallMicrosoftCLI: @escaping () -> Void,
         onConnectMicrosoftTeams: @escaping () -> Void,
         onSignOutMicrosoftTeams: @escaping () -> Void,
         onUpdateTeamsPresence: @escaping (Bool) -> Bool,
         onUpdateTeamsCallBlock: @escaping (Bool) -> Bool,
+        onUpdateTeamsControlScrollBlock: @escaping (Bool) -> Bool,
         onRefreshTeamsCallBlockPermissions: @escaping () -> Void,
         onUpdateMailBadge: @escaping (Bool) -> Void,
         onUpdateLaunchAtLogin: @escaping (Bool) -> Void
@@ -3254,23 +3308,35 @@ struct AppSettingsView: View {
         _draftMeetingFocusEnabled = State(initialValue: initialMeetingFocusEnabled)
         _draftTeamsPresenceEnabled = State(initialValue: initialTeamsPresenceEnabled)
         _draftTeamsCallBlockEnabled = State(initialValue: initialTeamsCallBlockEnabled)
+        _draftTeamsControlScrollBlockEnabled = State(initialValue: initialTeamsControlScrollBlockEnabled)
         _draftMailBadgeEnabled = State(initialValue: initialMailBadgeEnabled)
         _draftLaunchAtLoginEnabled = State(initialValue: initialLaunchAtLoginEnabled)
         self.connectionState = connectionState
+        self.isBusy = isBusy
+        self.errorMessage = errorMessage
+        self.errorRecovery = errorRecovery
+        self.gmailErrorMessage = gmailErrorMessage
+        self.gmailErrorRecovery = gmailErrorRecovery
+        self.currentCalendarNotificationsEnabled = currentCalendarNotificationsEnabled
         self.currentLanguage = currentLanguage
         self.currentMeetingFocusEnabled = currentMeetingFocusEnabled
         self.meetingFocusApprovalPending = meetingFocusApprovalPending
         self.meetingFocusStatusText = meetingFocusStatusText
         self.currentTeamsPresenceEnabled = currentTeamsPresenceEnabled
         self.currentTeamsCallBlockEnabled = currentTeamsCallBlockEnabled
+        self.currentTeamsControlScrollBlockEnabled = currentTeamsControlScrollBlockEnabled
         self.teamsCallBlockPermissionPending = teamsCallBlockPermissionPending
         self.teamsCallBlockStatusText = teamsCallBlockStatusText
         self.teamsPresenceStatusText = teamsPresenceStatusText
         self.microsoftConnectionState = microsoftConnectionState
         self.microsoftSetupConfig = microsoftSetupConfig
+        self.microsoftTeamsOperation = microsoftTeamsOperation
+        self.currentMailBadgeEnabled = currentMailBadgeEnabled
+        self.currentLaunchAtLoginEnabled = currentLaunchAtLoginEnabled
         self.onDone = onDone
+        self.onRecoverError = onRecoverError
+        self.onSignIn = onSignIn
         self.onSignOut = onSignOut
-        self.onResetGoogleSetup = onResetGoogleSetup
         self.onOpenNotificationSettings = onOpenNotificationSettings
         self.onOpenGitHub = onOpenGitHub
         self.onUpdateLanguage = onUpdateLanguage
@@ -3279,10 +3345,12 @@ struct AppSettingsView: View {
         self.onSendTestCalendarNotification = onSendTestCalendarNotification
         self.onUpdateMeetingFocus = onUpdateMeetingFocus
         self.onApproveMeetingFocus = onApproveMeetingFocus
+        self.onInstallMicrosoftCLI = onInstallMicrosoftCLI
         self.onConnectMicrosoftTeams = onConnectMicrosoftTeams
         self.onSignOutMicrosoftTeams = onSignOutMicrosoftTeams
         self.onUpdateTeamsPresence = onUpdateTeamsPresence
         self.onUpdateTeamsCallBlock = onUpdateTeamsCallBlock
+        self.onUpdateTeamsControlScrollBlock = onUpdateTeamsControlScrollBlock
         self.onRefreshTeamsCallBlockPermissions = onRefreshTeamsCallBlockPermissions
         self.onUpdateMailBadge = onUpdateMailBadge
         self.onUpdateLaunchAtLogin = onUpdateLaunchAtLogin
@@ -3299,135 +3367,145 @@ struct AppSettingsView: View {
                 Spacer()
             }
             .padding(.horizontal, 14)
-            .padding(.vertical, 12)
+            .frame(height: PopoverLayout.headerHeight)
 
             MenuDivider()
 
+            Picker("", selection: $selectedSection) {
+                ForEach(AppSettingsSection.allCases) { section in
+                    Text(section.title(text)).tag(section)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal, 10)
+            .padding(.top, 10)
+            .padding(.bottom, 6)
+
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
-                    SectionTitle(text.general)
-                    LanguagePickerRow(
-                        title: text.languageLabel,
-                        subtitle: text.languageSubtitle,
-                        selection: languageBinding
-                    )
-                    NotificationToggleRow(
-                        title: text.openAtLogin,
-                        subtitle: text.openAtLoginSubtitle,
-                        systemImage: "power",
-                        isOn: launchAtLoginBinding
-                    )
-                    SettingsActionRow(
-                        title: text.githubRepository,
-                        subtitle: text.githubRepositorySubtitle,
-                        systemImage: "chevron.left.forwardslash.chevron.right",
-                        buttonTitle: text.open,
-                        buttonRole: nil,
-                        isDisabled: false,
-                        action: onOpenGitHub
-                    )
+                    if let (message, recovery) = activeError {
+                        ErrorBanner(
+                            message: message,
+                            actionTitle: recovery?.buttonTitle,
+                            action: recovery.map { recovery in
+                                { onRecoverError(recovery) }
+                            }
+                        )
+                    }
 
-                    SectionTitle(text.calendar)
-                    NotificationToggleRow(
-                        title: text.desktopAlerts,
-                        subtitle: text.desktopAlertsSubtitle,
-                        systemImage: "bell.badge",
-                        isOn: calendarNotificationsBinding
-                    )
-                    AlertLeadSettingRow(selectedMinutes: alertLeadMinutesBinding, language: currentLanguage)
-                    SettingsActionRow(
-                        title: text.testAlert,
-                        subtitle: text.testAlertSubtitle,
-                        systemImage: "bell.badge.waveform",
-                        buttonTitle: text.send,
-                        buttonRole: nil,
-                        isDisabled: false,
-                        action: onSendTestCalendarNotification
-                    )
-                    MeetingFocusToggleRow(
-                        title: text.doNotDisturbDuringMeetings,
-                        subtitle: meetingFocusSubtitle,
-                        systemImage: "moon.zzz",
-                        isApprovalPending: meetingFocusApprovalPending,
-                        isOn: meetingFocusBinding,
-                        approveTitle: text.approve,
-                        approveHelp: text.approveHelp,
-                        onApprove: onApproveMeetingFocus
-                    )
-                    SettingsActionRow(
-                        title: text.notificationSettings,
-                        subtitle: text.notificationSettingsSubtitle,
-                        systemImage: "bell.and.waves.left.and.right",
-                        buttonTitle: text.open,
-                        buttonRole: nil,
-                        isDisabled: false,
-                        action: onOpenNotificationSettings
-                    )
-
-                    SectionTitle(text.teamsCallBlock)
-                    MicrosoftTeamsCallBlockSettingsCard(
-                        language: currentLanguage,
-                        isEnabled: teamsCallBlockBinding,
-                        statusText: teamsCallBlockStatusText
-                    )
-
-                    SectionTitle(text.teamsStatus)
-                    MicrosoftTeamsSettingsCard(
-                        language: currentLanguage,
-                        connectionState: microsoftConnectionState,
-                        isConfigured: microsoftSetupConfig.isComplete || Microsoft365CLIClient.isAvailable,
-                        presenceStatusText: teamsPresenceStatusText,
-                        isPresenceEnabled: teamsPresenceBinding,
-                        onConnect: onConnectMicrosoftTeams,
-                        onSignOut: onSignOutMicrosoftTeams
-                    )
-
-                    SectionTitle(text.mail)
-                    NotificationToggleRow(
-                        title: text.inboxUnreadBadge,
-                        subtitle: text.inboxUnreadBadgeSubtitle,
-                        systemImage: "envelope.badge",
-                        isOn: mailBadgeBinding
-                    )
-
-                    SectionTitle(text.account)
-                    SettingsActionRow(
-                        title: text.googleAccount,
-                        subtitle: connectionState.accountLine,
-                        systemImage: "person.crop.circle",
-                        buttonTitle: text.signOut,
-                        buttonRole: nil,
-                        isDisabled: !connectionState.isConnected,
-                        action: onSignOut
-                    )
-
-                    SectionTitle(text.googleSetup)
-                    SettingsActionRow(
-                        title: text.resetGoogleSetup,
-                        subtitle: text.resetGoogleSetupSubtitle,
-                        systemImage: "key.slash",
-                        buttonTitle: text.reset,
-                        buttonRole: .destructive,
-                        isDisabled: false,
-                        action: { showsResetGoogleSetupConfirmation = true }
-                    )
+                    switch selectedSection {
+                    case .general:
+                        LanguagePickerRow(
+                            title: text.languageLabel,
+                            subtitle: text.languageSubtitle,
+                            selection: languageBinding
+                        )
+                        NotificationToggleRow(
+                            title: text.openAtLogin,
+                            subtitle: text.openAtLoginSubtitle,
+                            systemImage: "power",
+                            isOn: launchAtLoginBinding
+                        )
+                    case .notifications:
+                        NotificationToggleRow(
+                            title: text.desktopAlerts,
+                            subtitle: text.desktopAlertsSubtitle,
+                            systemImage: "bell.badge",
+                            isOn: calendarNotificationsBinding
+                        )
+                        AlertLeadSettingRow(selectedMinutes: alertLeadMinutesBinding, language: currentLanguage)
+                        SettingsActionRow(
+                            title: text.testAlert,
+                            subtitle: text.testAlertSubtitle,
+                            systemImage: "bell.badge.waveform",
+                            buttonTitle: text.send,
+                            buttonRole: nil,
+                            isDisabled: isBusy,
+                            action: onSendTestCalendarNotification
+                        )
+                        MeetingFocusToggleRow(
+                            title: text.doNotDisturbDuringMeetings,
+                            subtitle: meetingFocusSubtitle,
+                            systemImage: "moon.zzz",
+                            isApprovalPending: meetingFocusApprovalPending,
+                            isOn: meetingFocusBinding,
+                            approveTitle: text.approve,
+                            approveHelp: text.approveHelp,
+                            onApprove: onApproveMeetingFocus
+                        )
+                        NotificationToggleRow(
+                            title: text.inboxUnreadBadge,
+                            subtitle: text.inboxUnreadBadgeSubtitle,
+                            systemImage: "envelope.badge",
+                            isOn: mailBadgeBinding
+                        )
+                        SettingsActionRow(
+                            title: text.notificationSettings,
+                            subtitle: text.notificationSettingsSubtitle,
+                            systemImage: "bell.and.waves.left.and.right",
+                            buttonTitle: text.open,
+                            buttonRole: nil,
+                            isDisabled: false,
+                            action: onOpenNotificationSettings
+                        )
+                    case .teams:
+                        MicrosoftTeamsCallProtectionSettingsCard(
+                            language: currentLanguage,
+                            isEnabled: teamsCallBlockBinding,
+                            statusText: teamsCallBlockStatusText
+                        )
+                        MicrosoftTeamsControlScrollBlockSettingsCard(
+                            language: currentLanguage,
+                            isEnabled: teamsControlScrollBlockBinding
+                        )
+                        MicrosoftTeamsSettingsCard(
+                            language: currentLanguage,
+                            connectionState: microsoftConnectionState,
+                            isCalendarConnected: connectionState.isConnected,
+                            usesNativeAuth: microsoftSetupConfig.isComplete,
+                            isCLIInstalled: Microsoft365CLIClient.isAvailable,
+                            operation: microsoftTeamsOperation,
+                            presenceStatusText: teamsPresenceStatusText,
+                            isPresenceEnabled: teamsPresenceBinding,
+                            onInstallCLI: onInstallMicrosoftCLI,
+                            onConnect: onConnectMicrosoftTeams,
+                            onSignOut: onSignOutMicrosoftTeams
+                        )
+                    case .account:
+                        SettingsActionRow(
+                            title: text.googleAccount,
+                            subtitle: connectionState.accountLine,
+                            systemImage: "person.crop.circle",
+                            buttonTitle: connectionState.isConnected
+                                ? text.signOut
+                                : text.s("Connect", "연결"),
+                            buttonRole: nil,
+                            isDisabled: isGoogleAccountActionDisabled,
+                            action: performGoogleAccountAction
+                        )
+                        SettingsActionRow(
+                            title: text.githubRepository,
+                            subtitle: text.githubRepositorySubtitle,
+                            systemImage: "chevron.left.forwardslash.chevron.right",
+                            buttonTitle: text.open,
+                            buttonRole: nil,
+                            isDisabled: false,
+                            action: onOpenGitHub
+                        )
+                    }
                 }
-                .padding(10)
+                .padding(.horizontal, 10)
+                .padding(.bottom, 10)
             }
+            .id(selectedSection)
 
-        }
-        .confirmationDialog(
-            text.resetGoogleSetupQuestion,
-            isPresented: $showsResetGoogleSetupConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button(text.resetGoogleSetup, role: .destructive, action: onResetGoogleSetup)
-            Button(text.cancel, role: .cancel) {}
-        } message: {
-            Text(text.resetGoogleSetupMessage)
         }
         .onChange(of: currentLanguage) { _, newValue in
             draftLanguage = newValue
+        }
+        .onChange(of: currentCalendarNotificationsEnabled) { _, newValue in
+            draftCalendarNotificationsEnabled = newValue
         }
         .onChange(of: currentMeetingFocusEnabled) { _, newValue in
             draftMeetingFocusEnabled = newValue
@@ -3438,7 +3516,41 @@ struct AppSettingsView: View {
         .onChange(of: currentTeamsCallBlockEnabled) { _, newValue in
             draftTeamsCallBlockEnabled = newValue
         }
+        .onChange(of: currentMailBadgeEnabled) { _, newValue in
+            draftMailBadgeEnabled = newValue
+        }
+        .onChange(of: currentLaunchAtLoginEnabled) { _, newValue in
+            draftLaunchAtLoginEnabled = newValue
+        }
         .onAppear(perform: onRefreshTeamsCallBlockPermissions)
+    }
+
+    private var activeError: (String, ErrorRecoveryAction?)? {
+        if selectedSection == .notifications, let gmailErrorMessage {
+            return (gmailErrorMessage, gmailErrorRecovery)
+        }
+        if let errorMessage {
+            return (errorMessage, errorRecovery)
+        }
+        return nil
+    }
+
+    private var isGoogleAccountActionDisabled: Bool {
+        if isBusy { return true }
+        switch connectionState {
+        case .loading, .missingBundleConfig:
+            return true
+        case .signedOut, .connected:
+            return false
+        }
+    }
+
+    private func performGoogleAccountAction() {
+        if connectionState.isConnected {
+            onSignOut()
+        } else {
+            onSignIn()
+        }
     }
 
     private var alertLeadMinutesBinding: Binding<Int> {
@@ -3498,11 +3610,6 @@ struct AppSettingsView: View {
         Binding(
             get: { draftTeamsPresenceEnabled },
             set: { newValue in
-                if newValue, !microsoftConnectionState.isConnected {
-                    draftTeamsPresenceEnabled = false
-                    onConnectMicrosoftTeams()
-                    return
-                }
                 draftTeamsPresenceEnabled = onUpdateTeamsPresence(newValue)
             }
         )
@@ -3513,6 +3620,15 @@ struct AppSettingsView: View {
             get: { draftTeamsCallBlockEnabled },
             set: { newValue in
                 draftTeamsCallBlockEnabled = onUpdateTeamsCallBlock(newValue)
+            }
+        )
+    }
+
+    private var teamsControlScrollBlockBinding: Binding<Bool> {
+        Binding(
+            get: { draftTeamsControlScrollBlockEnabled },
+            set: { newValue in
+                draftTeamsControlScrollBlockEnabled = onUpdateTeamsControlScrollBlock(newValue)
             }
         )
     }
@@ -3543,6 +3659,7 @@ struct WorkspaceAppsEditor: View {
     @State private var selectedAppID: String?
     @State private var draggingAppID: String?
     @State private var lastAutoScrollAt = Date.distantPast
+    private let initialApps: [WorkspaceApp]
     let onDone: () -> Void
     let onUpdateApps: ([WorkspaceApp]) -> Void
 
@@ -3553,6 +3670,7 @@ struct WorkspaceAppsEditor: View {
     ) {
         _draftApps = State(initialValue: initialApps)
         _selectedAppID = State(initialValue: initialApps.first?.id)
+        self.initialApps = initialApps
         self.onDone = onDone
         self.onUpdateApps = onUpdateApps
     }
@@ -3560,7 +3678,7 @@ struct WorkspaceAppsEditor: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
-                IconButton(symbolName: "chevron.left", title: "Back", action: onDone)
+                IconButton(symbolName: "xmark", title: "Cancel", action: onDone)
 
                 Text("Workspace")
                     .font(.system(size: 17, weight: .semibold))
@@ -3573,9 +3691,13 @@ struct WorkspaceAppsEditor: View {
 
                 IconButton(symbolName: "plus", title: "Add app", action: addCustomApp)
                 IconButton(symbolName: "arrow.counterclockwise", title: "Reset apps", action: resetDefaults)
+                Button("Save", action: saveAndDone)
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .disabled(draftApps == initialApps)
             }
             .padding(.horizontal, 14)
-            .padding(.vertical, 12)
+            .frame(height: PopoverLayout.headerHeight)
 
             MenuDivider()
 
@@ -3639,7 +3761,6 @@ struct WorkspaceAppsEditor: View {
                 if !newValue.contains(where: { $0.id == selectedAppID }) {
                     selectedAppID = newValue.first?.id
                 }
-                onUpdateApps(newValue)
             }
 
         }
@@ -3648,6 +3769,11 @@ struct WorkspaceAppsEditor: View {
     private var selectedIndex: Int? {
         guard let selectedAppID else { return nil }
         return draftApps.firstIndex(where: { $0.id == selectedAppID })
+    }
+
+    private func saveAndDone() {
+        onUpdateApps(draftApps)
+        onDone()
     }
 
     private func appBinding(_ index: Int) -> Binding<WorkspaceApp> {
@@ -4117,6 +4243,7 @@ struct IconButton: View {
                 .frame(width: 28, height: 28)
         }
         .buttonStyle(.borderless)
+        .accessibilityLabel(Text(title))
         .help(title)
     }
 }
@@ -4443,7 +4570,10 @@ enum MailBadgeSettings {
         if UserDefaults.standard.object(forKey: enabledKey) != nil {
             return UserDefaults.standard.bool(forKey: enabledKey)
         }
-        return UserDefaults.standard.bool(forKey: legacyEnabledKey)
+        if UserDefaults.standard.object(forKey: legacyEnabledKey) != nil {
+            return UserDefaults.standard.bool(forKey: legacyEnabledKey)
+        }
+        return true
     }
 
     static func saveEnabled(_ isEnabled: Bool) {
@@ -4453,8 +4583,12 @@ enum MailBadgeSettings {
 }
 
 enum LaunchAtLoginSettings {
+    static var status: SMAppService.Status {
+        SMAppService.mainApp.status
+    }
+
     static func isEnabled() -> Bool {
-        SMAppService.mainApp.status == .enabled
+        status == .enabled
     }
 
     static func setEnabled(_ isEnabled: Bool) throws {
@@ -4500,34 +4634,55 @@ enum ConnectionState: Equatable {
     var menuTitle: String {
         switch self {
         case .loading:
-            return "Google Calendar: Loading"
+            return "Google: Loading"
         case .missingBundleConfig:
-            return "Google Calendar: Bundle config missing"
+            return "Google: Unavailable"
         case .signedOut:
-            return "Google Calendar: Not signed in"
+            return "Google: Not connected"
         case .connected(let email):
-            return "Google Calendar: \(email ?? "Connected")"
+            return "Google: \(email ?? "Connected")"
         }
     }
 
     var accountLine: String {
         switch self {
         case .loading:
-            return "Loading Calendar"
+            return "Checking Google"
         case .missingBundleConfig:
-            return "Setup required"
+            return "Unavailable in this build"
         case .signedOut:
-            return "Not signed in"
+            return "Not connected"
         case .connected(let email):
             return email ?? "Connected"
         }
     }
 }
 
+struct GoogleOAuthConfiguration {
+    let clientID: String?
+    let callbackScheme: String?
+
+    var isComplete: Bool {
+        clientID != nil && callbackScheme != nil
+    }
+
+    static var current: GoogleOAuthConfiguration {
+        GoogleOAuthConfiguration(
+            clientID: Bundle.main.googleClientID,
+            callbackScheme: Bundle.main.googleReversedClientID
+        )
+    }
+}
+
+struct GoogleSignInGrant {
+    let gmailLabelsGranted: Bool
+}
+
 @MainActor
 final class GoogleSignInAuthClient {
     private let authWindow: AuthWindow
-    private let calendarScope = "https://www.googleapis.com/auth/calendar.readonly"
+    private let calendarScope = "https://www.googleapis.com/auth/calendar.events.readonly"
+    private let legacyCalendarScope = "https://www.googleapis.com/auth/calendar.readonly"
     private let gmailLabelsScope = "https://www.googleapis.com/auth/gmail.labels"
     private let signIn: GIDSignIn
 
@@ -4538,7 +4693,7 @@ final class GoogleSignInAuthClient {
 
     func connectionState() -> ConnectionState {
         configureIfPossible()
-        guard GoogleSetupConfig.current.isComplete else {
+        guard GoogleOAuthConfiguration.current.isComplete else {
             return .missingBundleConfig
         }
         guard let user = signIn.currentUser else {
@@ -4557,7 +4712,7 @@ final class GoogleSignInAuthClient {
 
     func restorePreviousSignIn() async throws {
         configureIfPossible()
-        guard GoogleSetupConfig.current.isComplete else {
+        guard GoogleOAuthConfiguration.current.isComplete else {
             throw AppError.missingBundleConfig
         }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
@@ -4573,12 +4728,16 @@ final class GoogleSignInAuthClient {
         }
     }
 
-    func signIn(includeGmailLabels: Bool = false) async throws {
+    func signIn(includeGmailLabels: Bool = false) async throws -> GoogleSignInGrant {
         configureIfPossible()
-        guard GoogleSetupConfig.current.isComplete else {
+        guard GoogleOAuthConfiguration.current.isComplete else {
             throw AppError.missingBundleConfig
         }
-        let window = authWindow.present(message: "Sign in with Google to connect Calendar.")
+        let window = authWindow.present(
+            message: includeGmailLabels
+                ? "Connect Calendar and Gmail unread count."
+                : "Connect Google Calendar."
+        )
         defer { authWindow.hide() }
         var scopes = [calendarScope]
         if includeGmailLabels {
@@ -4593,9 +4752,9 @@ final class GoogleSignInAuthClient {
         if !hasCalendarScope(result.user) {
             throw AppError.calendarScopeNotGranted
         }
-        if includeGmailLabels, !hasGmailLabelsScope(result.user) {
-            throw AppError.gmailScopeNotGranted
-        }
+        return GoogleSignInGrant(
+            gmailLabelsGranted: hasGmailLabelsScope(result.user)
+        )
     }
 
     func calendarAccessToken() async throws -> String {
@@ -4616,7 +4775,7 @@ final class GoogleSignInAuthClient {
 
     func ensureGmailLabelsScope() async throws {
         configureIfPossible()
-        guard GoogleSetupConfig.current.isComplete else {
+        guard GoogleOAuthConfiguration.current.isComplete else {
             throw AppError.missingBundleConfig
         }
         guard let user = signIn.currentUser else {
@@ -4628,11 +4787,16 @@ final class GoogleSignInAuthClient {
 
         let window = authWindow.present(message: "Allow Gmail unread badge access.")
         defer { authWindow.hide() }
-        let result = try await signIn.signIn(
-            withPresenting: window,
-            hint: user.profile?.email,
-            additionalScopes: [calendarScope, gmailLabelsScope]
-        )
+        let result: GIDSignInResult
+        if GoogleSignInFactory.supportsPublicIncrementalScopes {
+            result = try await addGmailLabelsScope(to: user, presenting: window)
+        } else {
+            result = try await signIn.signIn(
+                withPresenting: window,
+                hint: user.profile?.email,
+                additionalScopes: [gmailLabelsScope]
+            )
+        }
         if !hasGmailLabelsScope(result.user) {
             throw AppError.gmailScopeNotGranted
         }
@@ -4668,7 +4832,8 @@ final class GoogleSignInAuthClient {
     }
 
     private func hasCalendarScope(_ user: GIDGoogleUser) -> Bool {
-        user.grantedScopes?.contains(calendarScope) == true
+        let scopes = user.grantedScopes ?? []
+        return scopes.contains(calendarScope) || scopes.contains(legacyCalendarScope)
     }
 
     private func hasGmailLabelsScope(_ user: GIDGoogleUser) -> Bool {
@@ -4679,36 +4844,26 @@ final class GoogleSignInAuthClient {
         signIn.signOut()
     }
 
-    func clearSavedUserGrant() async {
-        configureIfPossible()
-        guard signIn.currentUser != nil else {
-            signIn.signOut()
-            return
-        }
-        do {
-            try await disconnect()
-        } catch {
-            signIn.signOut()
-        }
-    }
-
-    func disconnect() async throws {
-        configureIfPossible()
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            signIn.disconnect { error in
+    private func addGmailLabelsScope(
+        to user: GIDGoogleUser,
+        presenting window: NSWindow
+    ) async throws -> GIDSignInResult {
+        try await withCheckedThrowingContinuation { continuation in
+            user.addScopes([gmailLabelsScope], presenting: window) { result, error in
                 if let error {
                     continuation.resume(throwing: error)
+                } else if let result {
+                    continuation.resume(returning: result)
                 } else {
-                    continuation.resume(returning: ())
+                    continuation.resume(throwing: AppError.gmailScopeNotGranted)
                 }
             }
         }
-        signIn.signOut()
     }
 
     private func configureIfPossible() {
         guard signIn.configuration == nil,
-              let clientID = GoogleSetupConfig.current.clientID.nilIfBlank else {
+              let clientID = GoogleOAuthConfiguration.current.clientID else {
             return
         }
         configure(clientID: clientID)
@@ -4716,9 +4871,17 @@ final class GoogleSignInAuthClient {
 }
 
 enum GoogleSignInFactory {
+    static var supportsPublicIncrementalScopes: Bool {
+        #if GWS_LOCAL_FILE_KEYCHAIN
+        false
+        #else
+        true
+        #endif
+    }
+
     @MainActor
     static func makeSignIn() -> GIDSignIn {
-        #if os(macOS)
+        #if GWS_LOCAL_FILE_KEYCHAIN
         if let local = makeMacFileKeychainSignIn() {
             return local
         }
@@ -4726,6 +4889,7 @@ enum GoogleSignInFactory {
         return GIDSignIn.sharedInstance
     }
 
+    #if GWS_LOCAL_FILE_KEYCHAIN
     @MainActor
     private static func makeMacFileKeychainSignIn() -> GIDSignIn? {
         let store = KeychainStore(itemName: "auth", keychainAttributes: [KeychainAttribute.useFileBasedKeychain])
@@ -4743,6 +4907,7 @@ enum GoogleSignInFactory {
         }
         return signIn
     }
+    #endif
 }
 
 @MainActor
@@ -4778,14 +4943,96 @@ final class AuthWindow {
     }
 }
 
+enum GoogleAPIService: String, Sendable {
+    case calendar
+    case gmail
+}
+
+struct GoogleAPIError: LocalizedError, Sendable {
+    let service: GoogleAPIService
+    let statusCode: Int
+    let reason: String?
+    let message: String
+
+    var errorDescription: String? { message }
+
+    var requiresReconnect: Bool {
+        guard statusCode == 401 || statusCode == 403 else { return false }
+        let normalizedReason = reason?.lowercased() ?? ""
+        return statusCode == 401 || [
+            "autherror",
+            "invalidcredentials",
+            "invalid_grant",
+            "unauthorized"
+        ].contains(normalizedReason)
+    }
+
+    var isUnavailableInBuild: Bool {
+        let normalizedReason = reason?.lowercased() ?? ""
+        let normalizedMessage = message.lowercased()
+        return ["accessnotconfigured", "servicedisabled", "service_disabled"].contains(normalizedReason) ||
+            normalizedMessage.contains("api has not been used") ||
+            normalizedMessage.contains("service disabled")
+    }
+
+    var requiresAdditionalScope: Bool {
+        guard statusCode == 403 else { return false }
+        let normalizedReason = reason?.lowercased() ?? ""
+        let normalizedMessage = message.lowercased()
+        return ["insufficientpermissions", "insufficient_permissions"].contains(normalizedReason) ||
+            normalizedMessage.contains("insufficient authentication scope")
+    }
+
+    var isTransient: Bool {
+        if statusCode == 408 || statusCode == 429 || statusCode >= 500 {
+            return true
+        }
+        let normalizedReason = reason?.lowercased() ?? ""
+        return [
+            "backenderror",
+            "dailylimitexceeded",
+            "ratelimitexceeded",
+            "userratelimitexceeded"
+        ].contains(normalizedReason)
+    }
+
+    static func decode(
+        service: GoogleAPIService,
+        statusCode: Int,
+        data: Data
+    ) -> GoogleAPIError {
+        let envelope = try? JSONDecoder().decode(GoogleErrorEnvelope.self, from: data)
+        let fallback = String(data: data, encoding: .utf8)?.nilIfBlank
+            ?? "HTTP \(statusCode)"
+        return GoogleAPIError(
+            service: service,
+            statusCode: statusCode,
+            reason: envelope?.error.errors?.first?.reason ?? envelope?.error.status,
+            message: envelope?.error.message ?? fallback
+        )
+    }
+}
+
+private struct GoogleErrorEnvelope: Decodable {
+    let error: Payload
+
+    struct Payload: Decodable {
+        let message: String?
+        let status: String?
+        let errors: [Detail]?
+    }
+
+    struct Detail: Decodable {
+        let reason: String?
+    }
+}
+
 @MainActor
 final class GoogleCalendarService {
     private let authClient: GoogleSignInAuthClient
-    private let iso = ISO8601DateFormatter()
 
     init(authClient: GoogleSignInAuthClient) {
         self.authClient = authClient
-        iso.formatOptions = [.withInternetDateTime]
     }
 
     func loadUpcomingEvents() async throws -> [MeetingEvent] {
@@ -4802,23 +5049,28 @@ final class GoogleCalendarService {
         let encodedCalendarId = "primary".pathSegmentEncoded
         var components = URLComponents(string: "https://www.googleapis.com/calendar/v3/calendars/\(encodedCalendarId)/events")!
         components.queryItems = [
-            URLQueryItem(name: "timeMin", value: iso.string(from: start)),
-            URLQueryItem(name: "timeMax", value: iso.string(from: end)),
+            URLQueryItem(name: "timeMin", value: AppDateFormatters.iso8601String(from: start)),
+            URLQueryItem(name: "timeMax", value: AppDateFormatters.iso8601String(from: end)),
             URLQueryItem(name: "singleEvents", value: "true"),
             URLQueryItem(name: "orderBy", value: "startTime"),
             URLQueryItem(name: "showDeleted", value: "false"),
             URLQueryItem(name: "timeZone", value: TimeZone.autoupdatingCurrent.identifier),
-            URLQueryItem(name: "maxResults", value: "100")
+            URLQueryItem(name: "maxResults", value: "100"),
+            URLQueryItem(
+                name: "fields",
+                value: "items(id,summary,description,location,htmlLink,hangoutLink,status,eventType,transparency,creator(email,displayName,self),organizer(email,displayName,self),attendees(email,displayName,resource,self,responseStatus),start(dateTime,date),end(dateTime,date))"
+            )
         ]
 
         let response: GoogleEventsResponse = try await get(components.url!, token: token)
-        return response.items
+        return (response.items ?? [])
             .filter(\.belongsOnMyCalendar)
             .compactMap { MeetingEvent(event: $0, calendarName: nil) }
     }
 
     private func get<T: Decodable>(_ url: URL, token: String) async throws -> T {
         var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
 
         let (data, response) = try await URLSession.shared.data(for: request)
@@ -4826,8 +5078,11 @@ final class GoogleCalendarService {
             throw AppError.invalidResponse
         }
         guard (200..<300).contains(http.statusCode) else {
-            let body = String(data: data, encoding: .utf8) ?? "HTTP \(http.statusCode)"
-            throw AppError.api(body)
+            throw GoogleAPIError.decode(
+                service: .calendar,
+                statusCode: http.statusCode,
+                data: data
+            )
         }
         return try JSONDecoder().decode(T.self, from: data)
     }
@@ -4849,6 +5104,7 @@ final class GoogleGmailService {
         ]
 
         var request = URLRequest(url: components.url!)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
 
         let (data, response) = try await URLSession.shared.data(for: request)
@@ -4856,8 +5112,11 @@ final class GoogleGmailService {
             throw AppError.invalidResponse
         }
         guard (200..<300).contains(http.statusCode) else {
-            let body = String(data: data, encoding: .utf8) ?? "HTTP \(http.statusCode)"
-            throw AppError.api(body)
+            throw GoogleAPIError.decode(
+                service: .gmail,
+                statusCode: http.statusCode,
+                data: data
+            )
         }
 
         let decoded = try JSONDecoder().decode(GmailLabelResponse.self, from: data)
@@ -4869,19 +5128,8 @@ struct GmailLabelResponse: Decodable {
     let messagesUnread: Int?
 }
 
-struct GoogleCalendarListResponse: Decodable {
-    let items: [GoogleCalendar]
-}
-
-struct GoogleCalendar: Decodable {
-    let id: String
-    let summary: String
-    let hidden: Bool?
-    let accessRole: String?
-}
-
 struct GoogleEventsResponse: Decodable {
-    let items: [GoogleEvent]
+    let items: [GoogleEvent]?
 }
 
 struct GoogleEvent: Decodable {
@@ -5066,17 +5314,8 @@ struct MeetingEvent: Equatable {
     let selfResponseStatus: CalendarSelfResponseStatus
 
     init?(event: GoogleEvent, calendarName: String?) {
-        let fractionalParser = ISO8601DateFormatter()
-        fractionalParser.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let parser = ISO8601DateFormatter()
-        parser.formatOptions = [.withInternetDateTime]
-
         func parseDateTime(_ value: String?) -> Date? {
-            guard let value else { return nil }
-            if let parsed = fractionalParser.date(from: value) {
-                return parsed
-            }
-            return parser.date(from: value)
+            value.flatMap(AppDateFormatters.parseISO8601)
         }
 
         let allDay = event.start.dateTime == nil || event.end.dateTime == nil
@@ -5120,11 +5359,7 @@ struct MeetingEvent: Equatable {
     }
 
     var timeText: String {
-        let formatter = DateIntervalFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateStyle = .none
-        formatter.timeStyle = .short
-        return formatter.string(from: start, to: end)
+        AppDateFormatters.timeIntervalString(from: start, to: end)
     }
 
     var countdownText: String {
@@ -5143,18 +5378,22 @@ struct MeetingEvent: Equatable {
         return remainder == 0 ? "\(hours)h" : "\(hours)h \(remainder)m"
     }
 
-    func dayText(relativeTo now: Date, calendar: Calendar = .autoupdatingCurrent) -> String {
+    func dayText(
+        relativeTo now: Date,
+        language: AppLanguage = AppLanguageSettings.load(),
+        calendar: Calendar = .autoupdatingCurrent
+    ) -> String {
         if calendar.isDate(start, inSameDayAs: now) {
-            return "Today"
+            return language == .korean ? "오늘" : "Today"
         }
         if let tomorrow = calendar.date(byAdding: .day, value: 1, to: now),
            calendar.isDate(start, inSameDayAs: tomorrow) {
-            return "Tomorrow"
+            return language == .korean ? "내일" : "Tomorrow"
         }
 
-        let weekday = weekdayText(for: start)
+        let weekday = weekdayText(for: start, language: language)
         if isNextWeek(start, relativeTo: now, calendar: calendar) {
-            return "Next \(weekday)"
+            return language == .korean ? "다음 \(weekday)" : "Next \(weekday)"
         }
         return weekday
     }
@@ -5171,19 +5410,12 @@ struct MeetingEvent: Equatable {
         return date >= nextWeekStart && date < nextWeekEnd
     }
 
-    private func weekdayText(for date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "EEE"
-        return formatter.string(from: date)
+    private func weekdayText(for date: Date, language: AppLanguage) -> String {
+        AppDateFormatters.weekdayString(from: date, language: language)
     }
 
     var startTimeText: String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateStyle = .none
-        formatter.timeStyle = .short
-        return formatter.string(from: start)
+        AppDateFormatters.shortTimeString(from: start)
     }
 
     var detailLine: String {
@@ -5356,331 +5588,7 @@ enum MeetingLinkDetector {
     }
 }
 
-struct GoogleSetupConfig: Equatable {
-    var clientID: String
-    var reversedClientID: String
-
-    var isComplete: Bool {
-        clientID.nilIfBlank != nil && resolvedReversedClientID != nil
-    }
-
-    var resolvedReversedClientID: String? {
-        reversedClientID.nilIfBlank ?? Self.reversedClientID(from: clientID)
-    }
-
-    static var current: GoogleSetupConfig {
-        GoogleSetupConfig(
-            clientID: Bundle.main.googleClientID ?? "",
-            reversedClientID: Bundle.main.googleReversedClientID ?? ""
-        )
-    }
-
-    static func normalized(clientID: String, reversedClientID: String) throws -> GoogleSetupConfig {
-        if containsClientSecret(in: clientID) {
-            throw GoogleSetupError.webClientCredential
-        }
-
-        let normalizedClientID = extractedClientID(from: clientID) ?? clientID.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        guard isValidClientID(normalizedClientID) else {
-            throw GoogleSetupError.invalidClientID
-        }
-
-        let normalizedReversedClientID = reversedClientID.nilIfBlank ?? Self.reversedClientID(from: normalizedClientID) ?? ""
-        guard normalizedReversedClientID.hasPrefix("com.googleusercontent.apps."),
-              !normalizedReversedClientID.contains("YOUR_GOOGLE_CLIENT_ID") else {
-            throw GoogleSetupError.invalidURLScheme
-        }
-
-        return GoogleSetupConfig(clientID: normalizedClientID, reversedClientID: normalizedReversedClientID)
-    }
-
-    static func reversedClientID(from clientID: String) -> String? {
-        guard let normalized = extractedClientID(from: clientID) else {
-            return nil
-        }
-        let suffix = ".apps.googleusercontent.com"
-        return "com.googleusercontent.apps." + normalized.dropLast(suffix.count)
-    }
-
-    static func containsClientSecret(in input: String) -> Bool {
-        input.range(of: "client_secret", options: .caseInsensitive) != nil ||
-            input.range(of: "client secret", options: .caseInsensitive) != nil
-    }
-
-    static func looksLikeCredentialDocument(_ input: String) -> Bool {
-        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.hasPrefix("{") ||
-            trimmed.hasPrefix("<") ||
-            input.range(of: "client_id", options: .caseInsensitive) != nil ||
-            input.range(of: "CLIENT_ID") != nil ||
-            input.range(of: "GIDClientID") != nil ||
-            containsClientSecret(in: input)
-    }
-
-    static func extractedClientID(from input: String) -> String? {
-        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        if isValidClientID(trimmed) {
-            return trimmed
-        }
-
-        if let data = trimmed.data(using: .utf8) {
-            if let json = try? JSONSerialization.jsonObject(with: data),
-               let value = firstClientIDValue(in: json) {
-                return value
-            }
-            if let plist = try? PropertyListSerialization.propertyList(from: data, format: nil),
-               let value = firstClientIDValue(in: plist) {
-                return value
-            }
-        }
-
-        return firstClientIDMatch(in: trimmed)
-    }
-
-    private static func firstClientIDValue(in object: Any) -> String? {
-        if let string = object as? String, isValidClientID(string) {
-            return string.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-
-        if let dictionary = object as? [String: Any] {
-            for key in ["client_id", "CLIENT_ID", "GIDClientID"] {
-                if let value = dictionary[key] as? String, isValidClientID(value) {
-                    return value.trimmingCharacters(in: .whitespacesAndNewlines)
-                }
-            }
-            for value in dictionary.values {
-                if let found = firstClientIDValue(in: value) {
-                    return found
-                }
-            }
-        }
-
-        if let array = object as? [Any] {
-            for value in array {
-                if let found = firstClientIDValue(in: value) {
-                    return found
-                }
-            }
-        }
-
-        return nil
-    }
-
-    private static func firstClientIDMatch(in text: String) -> String? {
-        let pattern = #"[A-Za-z0-9_-]+\.apps\.googleusercontent\.com"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else {
-            return nil
-        }
-        let range = NSRange(text.startIndex..<text.endIndex, in: text)
-        guard let match = regex.firstMatch(in: text, range: range),
-              let matchRange = Range(match.range, in: text) else {
-            return nil
-        }
-        let value = String(text[matchRange])
-        return isValidClientID(value) ? value : nil
-    }
-
-    private static func isValidClientID(_ value: String) -> Bool {
-        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return normalized.hasSuffix(".apps.googleusercontent.com") &&
-            !normalized.contains("YOUR_GOOGLE_CLIENT_ID")
-    }
-}
-
-struct GoogleSetupResult {
-    let isSuccess: Bool
-    let message: String
-
-    static func success(_ message: String) -> GoogleSetupResult {
-        GoogleSetupResult(isSuccess: true, message: message)
-    }
-
-    static func failure(_ message: String) -> GoogleSetupResult {
-        GoogleSetupResult(isSuccess: false, message: message)
-    }
-}
-
-enum GoogleSetupError: LocalizedError {
-    case invalidClientID
-    case invalidURLScheme
-    case cannotReadInfoPlist
-    case cannotUpdateAppSignature(String)
-    case webClientCredential
-
-    var errorDescription: String? {
-        switch self {
-        case .invalidClientID:
-            return "Paste a Google OAuth client ID ending in .apps.googleusercontent.com."
-        case .invalidURLScheme:
-            return "Paste the reversed client ID URL scheme that starts with com.googleusercontent.apps."
-        case .cannotReadInfoPlist:
-            return "Could not read this app's Info.plist. Rebuild with the Google client values instead."
-        case .cannotUpdateAppSignature(let details):
-            return "Setup was saved, but macOS rejected the updated app signature. Reinstall GWS Menu from the README and try again. \(details)"
-        case .webClientCredential:
-            return "This looks like a Web application credential because it contains a client secret. Create an Apple/iOS OAuth client instead."
-        }
-    }
-}
-
-enum GoogleAppBundleSetup {
-    static func apply(config: GoogleSetupConfig) throws {
-        let infoURL = infoPlistURL()
-        var plist = try readInfoPlist(from: infoURL)
-
-        plist["GIDClientID"] = config.clientID
-        plist["CFBundleURLTypes"] = urlTypes(
-            preserving: plist["CFBundleURLTypes"] as? [[String: Any]],
-            googleScheme: config.reversedClientID
-        )
-
-        try writeInfoPlistAndUpdateSignature(plist, to: infoURL)
-        registerCurrentApp()
-    }
-
-    static func reset() throws {
-        let infoURL = infoPlistURL()
-        var plist = try readInfoPlist(from: infoURL)
-
-        plist.removeValue(forKey: "GIDClientID")
-        plist.removeValue(forKey: "GIDServerClientID")
-
-        if let urlTypes = plist["CFBundleURLTypes"] as? [[String: Any]] {
-            let filteredURLTypes = urlTypes.compactMap { urlType -> [String: Any]? in
-                guard let schemes = urlType["CFBundleURLSchemes"] as? [String] else {
-                    return urlType
-                }
-                let remainingSchemes = schemes.filter { scheme in
-                    !scheme.hasPrefix("com.googleusercontent.apps.") &&
-                        !isLegacyMicrosoftURLScheme(scheme)
-                }
-                guard !remainingSchemes.isEmpty else {
-                    return nil
-                }
-                var updated = urlType
-                updated["CFBundleURLSchemes"] = remainingSchemes
-                return updated
-            }
-
-            if filteredURLTypes.isEmpty {
-                plist.removeValue(forKey: "CFBundleURLTypes")
-            } else {
-                plist["CFBundleURLTypes"] = filteredURLTypes
-            }
-        }
-
-        try writeInfoPlistAndUpdateSignature(plist, to: infoURL)
-        registerCurrentApp()
-    }
-
-    static func infoPlistURL() -> URL {
-        Bundle.main.bundleURL
-            .appendingPathComponent("Contents", isDirectory: true)
-            .appendingPathComponent("Info.plist")
-    }
-
-    static func readInfoPlist(from infoURL: URL) throws -> [String: Any] {
-        let data = try Data(contentsOf: infoURL)
-        guard let plist = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else {
-            throw GoogleSetupError.cannotReadInfoPlist
-        }
-        return plist
-    }
-
-    private static func urlTypes(preserving existing: [[String: Any]]?, googleScheme: String) -> [[String: Any]] {
-        var output = existing?.compactMap { urlType -> [String: Any]? in
-            guard let schemes = urlType["CFBundleURLSchemes"] as? [String] else {
-                return urlType
-            }
-            let remainingSchemes = schemes.filter { scheme in
-                !scheme.hasPrefix("com.googleusercontent.apps.") &&
-                    !isLegacyMicrosoftURLScheme(scheme)
-            }
-            guard !remainingSchemes.isEmpty else {
-                return nil
-            }
-            var updated = urlType
-            updated["CFBundleURLSchemes"] = remainingSchemes
-            return updated
-        } ?? []
-
-        output.append(["CFBundleURLSchemes": [googleScheme]])
-        return output
-    }
-
-    private static func isLegacyMicrosoftURLScheme(_ scheme: String) -> Bool {
-        let normalized = scheme.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return normalized == "gwsmenu"
-    }
-
-    private static func writeInfoPlist(_ plist: [String: Any], to infoURL: URL) throws {
-        let output = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
-        try output.write(to: infoURL, options: .atomic)
-    }
-
-    static func writeInfoPlistAndUpdateSignature(_ plist: [String: Any], to infoURL: URL) throws {
-        let previousData = try? Data(contentsOf: infoURL)
-
-        try writeInfoPlist(plist, to: infoURL)
-
-        do {
-            try updateCurrentAppSignature()
-        } catch {
-            if let previousData {
-                try? previousData.write(to: infoURL, options: .atomic)
-            }
-            throw error
-        }
-    }
-
-    private static func updateCurrentAppSignature() throws {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
-        task.arguments = [
-            "--force",
-            "--sign",
-            "-",
-            Bundle.main.bundleURL.path
-        ]
-
-        let errorPipe = Pipe()
-        task.standardOutput = FileHandle.nullDevice
-        task.standardError = errorPipe
-
-        do {
-            try task.run()
-            task.waitUntilExit()
-        } catch {
-            throw GoogleSetupError.cannotUpdateAppSignature(error.localizedDescription)
-        }
-
-        guard task.terminationStatus == 0 else {
-            let data = errorPipe.fileHandleForReading.readDataToEndOfFile()
-            let details = String(data: data, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .nilIfBlank ?? "codesign exited with status \(task.terminationStatus)."
-            throw GoogleSetupError.cannotUpdateAppSignature(details)
-        }
-    }
-
-    static func registerCurrentApp() {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/bin/sh")
-        task.arguments = [
-            "-c",
-            "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f \(Bundle.main.bundleURL.path.shellQuoted)"
-        ]
-        task.standardOutput = FileHandle.nullDevice
-        task.standardError = FileHandle.nullDevice
-        if (try? task.run()) != nil {
-            task.waitUntilExit()
-        }
-    }
-}
-
-enum AppError: LocalizedError {
+enum AppError: LocalizedError, Sendable {
     case missingBundleConfig
     case invalidResponse
     case notSignedIn
@@ -5759,10 +5667,6 @@ extension String {
     var nilIfBlank: String? {
         let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
-    }
-
-    var shellQuoted: String {
-        "'" + replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     var pathSegmentEncoded: String {

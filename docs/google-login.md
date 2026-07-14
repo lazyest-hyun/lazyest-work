@@ -1,39 +1,43 @@
-# Google Login Setup
+# Google Connection
 
-GWS Menu uses Google Sign-In. Calendar sign-in requests:
+## User flow
+
+1. Open GWS Menu.
+2. Click **Connect Google**.
+3. Allow Calendar events and the Gmail unread count.
+
+Users do not create a Google Cloud project, install a CLI, paste a Client ID, or provide a client secret. Google Sign-In stores the session in Keychain and restores it after reboot.
+
+Fresh installs enable the Gmail unread badge by default so Calendar and Gmail can be approved in the same Google flow. If Gmail permission is declined, Calendar remains connected and the Gmail badge turns off.
+
+## Scopes
 
 ```text
-https://www.googleapis.com/auth/calendar.readonly
-```
-
-The Gmail unread badge is optional. If enabled in Settings, GWS Menu also requests:
-
-```text
+https://www.googleapis.com/auth/calendar.events.readonly
 https://www.googleapis.com/auth/gmail.labels
 ```
 
-That optional scope is used only for Inbox unread counts.
+Google does not offer a read-only scope limited to one label count. `gmail.labels` is the narrowest non-sensitive scope that can read the Inbox label; although the scope can also edit labels, GWS Menu only sends `GET /gmail/v1/users/me/labels/INBOX?fields=messagesUnread`. It does not request sender, subject, body, attachment, or message IDs.
 
-## Steps
+Existing sessions that already granted the broader legacy `calendar.readonly` scope continue to work without a forced sign-in.
 
-1. Enable **Google Calendar API** in Google Cloud.
-2. Optional: enable **Gmail API** if you want the Gmail unread badge.
-3. Create an OAuth client.
-4. Choose application type **iOS**. Google uses this for Apple native apps, including macOS apps.
-5. Use the Bundle ID shown in GWS Menu. The default is `io.github.gwsmenu.app`.
-6. Copy only the generated **Client ID** ending in `.apps.googleusercontent.com`.
-7. Paste it into GWS Menu, click **Save Setup**, then sign in.
+## Refresh behavior
 
-Do not use **Web application** credentials. If Google shows a `client_secret`, it is the wrong type.
+- Calendar and Gmail refresh at launch, when the menu opens, and after wake or session activation.
+- Calendar has a coalesced 15-minute safety refresh.
+- Gmail has a coalesced 5-minute safety refresh while its badge is enabled.
+- After GWS Menu opens Gmail, unread reconciliation checks immediately, backs off while unchanged, and performs two short stable checks after a change. It is capped at seven requests and concurrent refreshes share one task.
 
-## Notifications
+## Publisher configuration
 
-- **Settings -> Calendar -> Desktop alerts** uses macOS notifications at the selected meeting alert time.
-- **Settings -> Calendar -> Do Not Disturb during meetings** can turn on Do Not Disturb during accepted meetings after one-time macOS approval.
-- **Settings -> Mail -> Inbox unread badge** shows the unread count on the menu bar icon and Gmail tile, capped as `99+`.
-- The Gmail badge does not read sender, subject, body, or attachments, and it does not send desktop mail alerts.
+The publisher owns one Google Apple-native OAuth Client ID for the app Bundle ID. The build embeds that Client ID and its reversed callback scheme:
 
-## Reset
+```bash
+GWS_BUILD_MODE=distribution \
+GWS_GOOGLE_CLIENT_ID="<publisher-client-id>" \
+GWS_CODESIGN_IDENTITY="Developer ID Application: ..." \
+GWS_TEAM_ID="<apple-team-id>" \
+scripts/build-macos-app.sh --distribution
+```
 
-- **Sign Out** retries the same Google setup.
-- **Settings -> Google setup -> Reset** removes the saved Client ID and URL scheme from the current app bundle.
+Distribution builds fail if the publisher Client ID, callback scheme, Developer ID Application identity, or Keychain access group is unavailable. Runtime bundle mutation and re-signing are intentionally unsupported. `scripts/package-macos-release.sh` performs notarization, ticket stapling, Gatekeeper validation, and final ZIP creation.

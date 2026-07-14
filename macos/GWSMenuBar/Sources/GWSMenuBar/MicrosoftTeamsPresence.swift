@@ -156,6 +156,7 @@ enum TeamsPresenceSettings {
 enum MicrosoftConnectionState: Equatable {
     case missingSetup
     case signedOut
+    case failed
     case connected(account: String?)
 
     var isConnected: Bool {
@@ -171,10 +172,22 @@ enum MicrosoftConnectionState: Equatable {
             return "Not configured in this build"
         case .signedOut:
             return "Not connected"
+        case .failed:
+            return "Connection check failed"
         case .connected(let account):
             return account ?? "Connected"
         }
     }
+}
+
+enum MicrosoftTeamsOperation: Equatable {
+    case idle
+    case checkingConnection
+    case installingCLI
+    case signingIn
+    case signingOut
+
+    var isActive: Bool { self != .idle }
 }
 
 struct MicrosoftTokenSet: Codable, Equatable {
@@ -542,6 +555,7 @@ final class MicrosoftTeamsPresenceService {
     private let cliClient: Microsoft365CLIClient
     private let managedSessionKey = "teamsPresenceManagedSession"
     private let pausedEventIDKey = "teamsPresencePausedEventID"
+    private let lastPresenceVerificationKey = "teamsPresenceLastVerificationAt"
 
     init(authClient: MicrosoftGraphAuthClient, cliClient: Microsoft365CLIClient) {
         self.authClient = authClient
@@ -634,8 +648,10 @@ final class MicrosoftTeamsPresenceService {
 
         if let managedSession,
            managedSession.eventID == eventID,
-           managedSession.expiresAt > now {
+           managedSession.expiresAt > now,
+           shouldVerifyCurrentPresence(defaults: defaults, now: now) {
             let presence = try await currentPresence()
+            defaults.set(now, forKey: lastPresenceVerificationKey)
             if !presence.isPreferredBusy {
                 savePausedEvent(eventID, defaults)
                 clearManagedState(defaults)
@@ -674,6 +690,7 @@ final class MicrosoftTeamsPresenceService {
             TeamsPresencePolicy.managedSession(eventID: eventID, request: request, userID: userID),
             defaults
         )
+        defaults.set(now, forKey: lastPresenceVerificationKey)
         return .applied(until: request.expiresAt)
     }
 
@@ -723,6 +740,14 @@ final class MicrosoftTeamsPresenceService {
 
     private func clearManagedState(_ defaults: UserDefaults) {
         defaults.removeObject(forKey: managedSessionKey)
+        defaults.removeObject(forKey: lastPresenceVerificationKey)
+    }
+
+    private func shouldVerifyCurrentPresence(defaults: UserDefaults, now: Date) -> Bool {
+        guard let lastVerifiedAt = defaults.object(forKey: lastPresenceVerificationKey) as? Date else {
+            return true
+        }
+        return now.timeIntervalSince(lastVerifiedAt) >= 300
     }
 
     private func pausedEventID(_ defaults: UserDefaults) -> String? {

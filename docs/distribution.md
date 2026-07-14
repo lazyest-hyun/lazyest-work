@@ -1,31 +1,48 @@
 # Distribution Notes
 
-## Free Source Install
+## Public release
 
-Users can build and install locally:
-
-```bash
-swift scripts/sync-google-app-icons.swift --accept-google-brand-terms
-```
-
-This installs:
+Public users install one signed and notarized app bundle. The publisher Google OAuth Client ID and callback scheme are embedded at build time, so the app's first-run flow is only:
 
 ```text
-/Applications/GWSMenu.app
+Connect Google -> Allow -> Done
 ```
 
-This path does not require a DMG, notarization, or paid Apple Developer Program membership, but macOS may ask for admin approval when replacing the app bundle.
+Users never edit the app bundle or configure Google Cloud.
 
-On first launch, users can enable **Teams call block** and **Open at login** before connecting Google. Teams call block is local-only: it needs macOS Accessibility/event-monitoring approval, not Microsoft Graph sign-in. Teams status is separate and uses Microsoft 365 CLI sign-in when the user connects Microsoft.
+## Publisher Google configuration
 
-## Google Cloud
+- Enable Google Calendar API and Gmail API in the publisher project.
+- Create an Apple-native OAuth client for the release Bundle ID.
+- Configure the external OAuth consent screen and complete the brand/data-access verification shown by Google Cloud for `calendar.events.readonly`.
+- `gmail.labels` is a [non-sensitive Gmail scope](https://developers.google.com/workspace/gmail/api/auth/scopes), so this design does not require a restricted Gmail scope or its third-party security assessment.
+- Do not create or bundle a Web client secret.
 
-- Enable **Google Calendar API**.
-- Optional: enable **Gmail API** for the Gmail unread badge.
-- Create an OAuth client with application type **iOS**.
-- Use the app Bundle ID shown in GWS Menu. The default is `io.github.gwsmenu.app`.
-- Copy only the generated **Client ID**.
-- Do not use a Web credential or any `client_secret`.
+Build with:
+
+```bash
+GWS_BUILD_MODE=distribution \
+GWS_GOOGLE_CLIENT_ID="<publisher-client-id>" \
+GWS_CODESIGN_IDENTITY="Developer ID Application: ..." \
+GWS_TEAM_ID="<apple-team-id>" \
+scripts/build-macos-app.sh --distribution
+```
+
+The reversed callback scheme is derived from the Client ID. A mismatched scheme, missing publisher ID, non-Developer-ID signature, or missing Keychain access group fails the build.
+
+For the GitHub Release artifact, store notarization credentials once with `notarytool store-credentials`, then package with the saved profile:
+
+```bash
+GWS_GOOGLE_CLIENT_ID="<publisher-client-id>" \
+GWS_CODESIGN_IDENTITY="Developer ID Application: ... (<apple-team-id>)" \
+GWS_TEAM_ID="<apple-team-id>" \
+GWS_NOTARY_PROFILE="gws-menu-notary" \
+scripts/package-macos-release.sh
+```
+
+The packaging script signs with the hardened runtime, submits the ZIP to Apple, staples the accepted ticket to the app, validates it with Gatekeeper, and then recreates the final release ZIP. `Apple Distribution` certificates are intentionally rejected because they are for App Store workflows, not direct GitHub distribution.
+
+Local development builds may reuse the publisher ID embedded in an existing `/Applications/GWSMenu.app`. This compatibility behavior is never used for a distribution artifact.
 
 ## Microsoft Graph
 
@@ -34,9 +51,9 @@ Teams status is optional. Without a native Microsoft client ID, GWS Menu uses Mi
 ## Security
 
 - Google auth is handled by Google Sign-In and Keychain.
-- Calendar access is read-only.
-- The optional Gmail badge uses unread counts only and does not send desktop mail alerts.
+- Calendar uses `calendar.events.readonly` for the primary calendar's upcoming events.
+- Gmail uses `gmail.labels` only for the Inbox unread count and does not send desktop mail alerts.
 - Teams call block uses local macOS Accessibility and event monitoring permissions only when enabled.
 - Teams status uses Microsoft Graph delegated presence access through Microsoft 365 CLI unless the app bundle includes a native Microsoft client ID. It sets user preferred presence and relies on the selected backend's stored connection.
 - Generated Google product icons are ignored by Git.
-- A signed prebuilt app is optional and needs Apple Developer signing/notarization.
+- Public GitHub Release builds require Developer ID signing and notarization; local source builds do not.

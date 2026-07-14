@@ -90,7 +90,7 @@ public enum MenuSectionVisibility {
     }
 }
 
-public enum MeetingFocusState: Equatable {
+public enum MeetingFocusState: Equatable, Sendable {
     case inactive
     case active(until: Date, eventID: String)
 }

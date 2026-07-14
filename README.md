@@ -15,89 +15,48 @@ Native macOS menu bar app for Google Workspace shortcuts, read-only Google Calen
 - Shows an optional Gmail Inbox unread badge, capped as `99+`.
 - Stores Google sign-in in Keychain. Teams status uses Microsoft 365 CLI's stored grant unless a native Microsoft client ID is configured.
 
-## Quick Start
+## Install
 
-1. Install Xcode Command Line Tools if Swift is not available:
+Public users should install the signed and notarized GitHub Release build. Its publisher-owned Google OAuth configuration is already included; users do not create a Cloud project or paste a Client ID.
 
-```bash
-xcode-select --install
-```
-
-2. Clone the repository and run the installer:
+For local development:
 
 ```bash
 git clone https://github.com/hyunn515/gws-menu-app.git
 cd gws-menu-app
-swift scripts/sync-google-app-icons.swift --accept-google-brand-terms
+GWS_GOOGLE_CLIENT_ID="<publisher-client-id>" \
+  swift scripts/sync-google-app-icons.swift --accept-google-brand-terms
 ```
 
-This command downloads Google product icons into git-ignored local resources, builds the macOS app, installs it to `/Applications/GWSMenu.app`, and opens it.
-
-No DMG, notarization, or paid Apple Developer account is required when you build from source.
+This builds, installs to `/Applications/GWSMenu.app`, and opens the app. A Google native-app Client ID is public configuration, not a secret; the app never bundles a client secret.
 
 ## Connect Google
 
-Open GWS Menu from the menu bar and click **Open Setup**.
+1. Open GWS Menu.
+2. Click **Connect Google**.
+3. Allow Calendar events and the Gmail unread count.
 
-![GWS Menu setup steps](docs/screenshots/google-setup-steps.png)
+That is the complete user setup. The session is restored from Keychain after reboot.
 
-### 1. Enable APIs
+The Gmail badge is enabled by default on a fresh install. It reads only the Inbox unread count, not sender, subject, body, attachments, or message IDs. After GWS Menu opens Gmail, it briefly rechecks the count with bounded backoff and stops after the new count settles.
 
-In Google Cloud Console, choose or create a project, then enable:
+Optional features remain separate:
 
-- **Google Calendar API**: required
-- **Gmail API**: optional, only for the unread badge
-
-If Google asks for an OAuth consent screen first, choose **Internal** for a Workspace organization or **External / Testing** for personal use, then add yourself as a test user.
-
-Calendar API should look enabled:
-
-![Google Calendar API enabled](docs/screenshots/calendar-api-enabled.png)
-
-### 2. Create OAuth Client
-
-Go to **Credentials -> Create credentials -> OAuth client ID**.
-
-Use these values:
-
-- **Application type**: `iOS`
-- **Name**: anything, for example `GWS Menu`
-- **Bundle ID**: copy the Bundle ID shown in GWS Menu. The default is `io.github.gwsmenu.app`.
-
-Google labels this as `iOS`, but it is also the correct Apple-native OAuth type for this macOS sign-in flow.
-If you build with a custom `GWS_BUNDLE_ID`, use that exact value here.
-
-![Google Cloud OAuth iOS client fields](docs/screenshots/google-cloud-oauth-ios-fields.png)
-
-After creating it, copy only the **Client ID** ending in `.apps.googleusercontent.com`.
-
-### 3. Save and Sign In
-
-Paste the Client ID into GWS Menu and click **Save Setup**. GWS Menu updates the local app bundle, registers the Google callback URL, restarts, and then you can click **Sign in**.
-
-Do not use **Web application** or **Desktop app** credentials. If Google shows a `client_secret`, it is the wrong credential type. GWS Menu does not use or store a client secret.
-
-GWS Menu shows a small **Finish setup** card for optional features:
-
-- **Teams call block**: asks for macOS Accessibility/event-monitoring permission when enabled. Microsoft sign-in is not needed.
-- **Open at login**: adds GWS Menu to macOS Login Items.
-- **Meeting alerts**: asks for macOS notification permission only when you enable it.
-- **Do Not Disturb during meetings**: reuses existing approval, or shows an **Approve** button for one-time macOS approval.
-- **Gmail badge**: asks for Gmail unread-count permission only when you enable it. After opening Gmail from GWS Menu, the unread count refreshes faster for two minutes.
-
-On a first install, **Teams call block** and **Open at login** can be enabled before connecting Google. Calendar alerts and Gmail badge appear after Google Calendar is connected.
+- **Teams call block**: local macOS permission; no Microsoft sign-in.
+- **Open at login**: adds GWS Menu to Login Items.
+- **Meeting alerts**: requests macOS notification permission when enabled.
+- **Do Not Disturb during meetings**: one-time macOS Shortcuts approval when enabled.
+- **Teams Busy**: optional Microsoft connection.
 
 ## Settings
 
 Open Settings from the gear button in GWS Menu. Changes save automatically.
 
-- **Calendar**: choose desktop alert timing, send a test alert, and optionally enable Do Not Disturb during meetings.
+- **Calendar & Mail**: meeting alerts, Do Not Disturb, and the Gmail unread badge.
 - **Teams call block**: require confirmation before supported Teams outgoing call buttons and block Control-scroll zoom inside Teams.
 - **Teams status**: optional Microsoft Graph integration through Microsoft 365 CLI.
-- **Mail**: enable or disable the Gmail unread badge.
 - **General**: enable Open at login or open the GitHub repository.
-- **Account**: sign out of Google.
-- **Google setup**: reset the saved Client ID and URL scheme if you need to start over.
+- **Account**: connect or sign out of Google.
 
 To customize Workspace shortcuts, click the sliders button next to the **Workspace** label on the main menu. The editor uses the same grid layout as the menu.
 
@@ -105,7 +64,7 @@ To customize Workspace shortcuts, click the sliders button next to the **Workspa
 
 GWS Menu can turn on macOS Do Not Disturb during accepted meetings.
 
-1. Open **Settings -> Calendar**.
+1. Open **Settings -> Calendar & Mail**.
 2. Turn on **Do Not Disturb during meetings**.
 3. If an **Approve** button appears, click it, then click **Add Shortcut** once in macOS.
 4. Return to GWS Menu. The setting turns on automatically after approval.
@@ -142,7 +101,7 @@ GWS Menu blocks only Teams elements whose accessibility role and label identify 
 
 ## Updating
 
-Open **Settings -> General -> GitHub repository**, then update manually from the repo:
+Public builds update from GitHub Releases. Source builds can update manually:
 
 ```bash
 git pull
@@ -153,8 +112,8 @@ The installer closes any running `GWSMenu` process, replaces `/Applications/GWSM
 
 ## Privacy and Permissions
 
-- Calendar access uses `https://www.googleapis.com/auth/calendar.readonly`.
-- The Gmail badge uses `https://www.googleapis.com/auth/gmail.labels` only when enabled.
+- Calendar access uses `https://www.googleapis.com/auth/calendar.events.readonly`.
+- The Gmail badge uses the non-sensitive `https://www.googleapis.com/auth/gmail.labels` scope only when enabled. Google defines it as label read/write access; GWS Menu only performs a read of the Inbox `messagesUnread` field because Google offers no count-only scope.
 - Teams status uses Microsoft Graph delegated presence access through Microsoft 365 CLI unless a native Microsoft client ID is explicitly configured.
 - Teams call block uses macOS Accessibility and event monitoring permissions only when enabled. It does not require Microsoft Graph or Teams sign-in.
 - GWS Menu does not read Gmail sender, subject, body, attachments, or message IDs.
@@ -167,10 +126,10 @@ The installer closes any running `GWSMenu` process, replaces `/Applications/GWSM
 
 ## Troubleshooting
 
-- **`client_secret` error**: delete that OAuth client and create an `iOS` OAuth client instead.
-- **Sign-in opens and immediately closes**: open **Setup**, save the current Client ID once, then sign in again.
+- **Google unavailable in this build**: install an official release or rebuild with the publisher Client ID.
+- **Google sign-in opens and closes**: install the latest build and click **Connect Google** again.
 - **Meeting alerts do not appear**: allow GWS Menu in **System Settings -> Notifications**, then enable Meeting alerts again.
-- **Need to verify alerts**: open **Settings -> Calendar -> Test alert** and click **Send**.
+- **Need to verify alerts**: open **Settings -> Calendar & Mail -> Test alert** and click **Send**.
 - **Do Not Disturb during meetings asks for approval**: click **Approve**, then click **Add Shortcut** once in macOS. GWS Menu turns the setting on automatically after approval.
 - **Teams status backend is missing**: install Node.js/npm or the `m365` CLI, then turn on **Settings -> Teams status** again.
 - **Teams status asks for organization approval**: your Microsoft organization controls Graph presence consent. Use an approved Microsoft Graph Command Line Tools grant or leave Teams status off.
@@ -193,6 +152,8 @@ cargo test
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 swift build --package-path macos/GWSMenuBar
+scripts/test-gws-menu-core.sh
+bash -n scripts/package-macos-release.sh
 ```
 
 Teams status uses Microsoft 365 CLI with Microsoft's first-party Microsoft Graph Command Line Tools app ID when no native Microsoft client is configured.

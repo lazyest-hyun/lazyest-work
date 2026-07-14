@@ -2,7 +2,6 @@
 @preconcurrency import ApplicationServices
 import Combine
 import Foundation
-import IOKit.hid
 
 @MainActor
 private final class TeamsCallConfirmationController: NSObject {
@@ -115,6 +114,7 @@ private final class TeamsCallConfirmationController: NSObject {
 
 enum TeamsCallBlockSettings {
     private static let enabledKey = "teamsCallBlockEnabled"
+    private static let controlScrollEnabledKey = "teamsControlScrollBlockEnabled"
     private static let pendingEnableKey = "teamsCallBlockPendingEnableAfterPermission"
     private static let statusKey = "teamsCallBlockStatusText"
 
@@ -124,6 +124,14 @@ enum TeamsCallBlockSettings {
 
     static func saveEnabled(_ isEnabled: Bool) {
         UserDefaults.standard.set(isEnabled, forKey: enabledKey)
+    }
+
+    static func loadControlScrollEnabled() -> Bool {
+        UserDefaults.standard.bool(forKey: controlScrollEnabledKey)
+    }
+
+    static func saveControlScrollEnabled(_ isEnabled: Bool) {
+        UserDefaults.standard.set(isEnabled, forKey: controlScrollEnabledKey)
     }
 
     static func loadPendingEnableAfterPermission() -> Bool {
@@ -146,54 +154,28 @@ enum TeamsCallBlockSettings {
 enum TeamsCallBlockPermissionState: Equatable {
     case ready
     case missingAccessibility
-    case missingInputMonitoring
-    case missingAccessibilityAndInputMonitoring
 
     var isReady: Bool {
         self == .ready
     }
 
-    var hasAccessibility: Bool {
-        switch self {
-        case .ready, .missingInputMonitoring:
-            return true
-        case .missingAccessibility, .missingAccessibilityAndInputMonitoring:
-            return false
-        }
-    }
-
-    var hasInputMonitoring: Bool {
-        switch self {
-        case .ready, .missingAccessibility:
-            return true
-        case .missingInputMonitoring, .missingAccessibilityAndInputMonitoring:
-            return false
-        }
-    }
-
     var statusText: String {
         switch self {
         case .ready:
-            return "Off. Turn on to confirm Teams calls and block Teams Control-scroll."
+            return "Off. Turn on Teams call confirmation."
         case .missingAccessibility:
-            return "Off. Accessibility permission is needed before Teams calls can be blocked."
-        case .missingInputMonitoring:
-            return "Off. Input Monitoring permission is needed before Teams events can be watched."
-        case .missingAccessibilityAndInputMonitoring:
             return "Off. Accessibility permission is needed before Teams calls can be blocked."
         }
     }
 
     var runningStatusText: String {
-        "On. Teams calls require confirmation; Control-scroll is blocked in Teams."
+        "On. Teams calls require confirmation."
     }
 
     var eventMonitoringUnavailableText: String {
         switch self {
-        case .missingAccessibility, .missingAccessibilityAndInputMonitoring:
+        case .missingAccessibility:
             return "Off. Accessibility permission is not detected for GWS Menu."
-        case .missingInputMonitoring:
-            return "Off. Input Monitoring is not detected for GWS Menu."
         case .ready:
             return "Off. macOS did not allow event monitoring. Quit and reopen GWS Menu."
         }
@@ -201,10 +183,8 @@ enum TeamsCallBlockPermissionState: Equatable {
 
     var pendingEnableStatusText: String {
         switch self {
-        case .missingAccessibility, .missingAccessibilityAndInputMonitoring:
+        case .missingAccessibility:
             return "Waiting for Accessibility permission. Enable GWS Menu in System Settings."
-        case .missingInputMonitoring:
-            return "Waiting for Input Monitoring permission. Enable GWS Menu in System Settings."
         case .ready:
             return "Waiting for macOS event monitoring. GWS Menu will turn on Teams call block automatically."
         }
@@ -214,30 +194,21 @@ enum TeamsCallBlockPermissionState: Equatable {
         let accessibilityGranted = AXIsProcessTrustedWithOptions(
             [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false] as CFDictionary
         )
-        let hidInputGranted = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
-        let eventInputGranted: Bool
-        if #available(macOS 10.15, *) {
-            eventInputGranted = CGPreflightListenEventAccess()
-        } else {
-            eventInputGranted = true
-        }
-        let inputMonitoringGranted = hidInputGranted || eventInputGranted
-
-        switch (accessibilityGranted, inputMonitoringGranted) {
-        case (true, true):
-            return .ready
-        case (false, false):
-            return .missingAccessibilityAndInputMonitoring
-        case (false, true):
-            return .missingAccessibility
-        case (true, false):
-            return .missingInputMonitoring
-        }
+        return accessibilityGranted ? .ready : .missingAccessibility
     }
 }
 
 final class MicrosoftTeamsCallBlocker: ObservableObject, @unchecked Sendable {
+    private final class CallbackContext {
+        weak var blocker: MicrosoftTeamsCallBlocker?
+
+        init(blocker: MicrosoftTeamsCallBlocker) {
+            self.blocker = blocker
+        }
+    }
+
     @Published private(set) var isEnabled = false
+    @Published private(set) var isControlScrollBlockEnabled = false
     @Published private(set) var permissionState = TeamsCallBlockPermissionState.current()
     @Published private(set) var isPendingEnableAfterPermission = TeamsCallBlockSettings.loadPendingEnableAfterPermission()
     @Published private(set) var statusText = TeamsCallBlockSettings.loadStatusText()
@@ -281,6 +252,8 @@ final class MicrosoftTeamsCallBlocker: ObservableObject, @unchecked Sendable {
     ]
 
     private let allowCooldown: TimeInterval = 0.7
+    private let inputDrivenWindowRefreshInterval: TimeInterval = 0.2
+    private let windowSnapshotStaleInterval: TimeInterval = 5.0
     private var passThroughUntil = Date.distantPast
     private var swallowMouseUpUntil = Date.distantPast
     private var swallowAllUntil = Date.distantPast
@@ -290,16 +263,63 @@ final class MicrosoftTeamsCallBlocker: ObservableObject, @unchecked Sendable {
     private var teamsWindowFrames: [CGRect] = []
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
+    private var eventTapIncludesScrollWheel = false
     private var workspaceObserver: NSObjectProtocol?
-    private var windowRefreshTimer: Timer?
+    private var screenParametersObserver: NSObjectProtocol?
+    private var teamsAccessibilityObservers: [pid_t: AXObserver] = [:]
+    private var isTeamsWindowRefreshScheduled = false
+    private var requiresInputDrivenWindowRefresh = false
+    private var lastTeamsWindowSnapshotAt = Date.distantPast
+    private var lastInputDrivenWindowRefreshAt = Date.distantPast
+    private var callbackContextPointer: UnsafeMutableRawPointer?
     private var permissionRetryTimer: Timer?
+    private var permissionRetryCount = 0
+    private var confirmationTask: Task<Void, Never>?
+    private var shouldContinuePermissionRequests = false
+    private var didRequestAccessibility = false
     private var lastTeamsAccessibilityWarmUp = Date.distantPast
 
-    func configure(savedEnabled: Bool) {
-        permissionState = TeamsCallBlockPermissionState.current()
+    deinit {
+        if let eventTap {
+            CGEvent.tapEnable(tap: eventTap, enable: false)
+            CFMachPortInvalidate(eventTap)
+        }
+        if let runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+        }
+        if let workspaceObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(workspaceObserver)
+        }
+        if let screenParametersObserver {
+            NotificationCenter.default.removeObserver(screenParametersObserver)
+        }
+        for observer in teamsAccessibilityObservers.values {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
+        }
+        permissionRetryTimer?.invalidate()
+        confirmationTask?.cancel()
+        if let callbackContextPointer {
+            Unmanaged<CallbackContext>.fromOpaque(callbackContextPointer).release()
+        }
+    }
 
-        guard savedEnabled || isPendingEnableAfterPermission else {
-            isEnabled = false
+    private var hasEnabledProtection: Bool {
+        isEnabled || isControlScrollBlockEnabled
+    }
+
+    private var callProtectionStatusText: String {
+        isEnabled
+            ? permissionState.runningStatusText
+            : permissionState.statusText
+    }
+
+    func configure(savedEnabled: Bool, savedControlScrollBlockEnabled: Bool) {
+        permissionState = TeamsCallBlockPermissionState.current()
+        let shouldResumePermissionRequest = isPendingEnableAfterPermission
+        isEnabled = savedEnabled
+        isControlScrollBlockEnabled = savedControlScrollBlockEnabled
+
+        guard hasEnabledProtection || isPendingEnableAfterPermission else {
             setStatus(permissionState.statusText)
             return
         }
@@ -308,43 +328,47 @@ final class MicrosoftTeamsCallBlocker: ObservableObject, @unchecked Sendable {
         if started {
             finishEnableSuccess()
         } else {
-            beginPendingEnableAfterPermission(openPermissionsIfMissing: false)
+            beginPendingEnableAfterPermission(openPermissionsIfMissing: shouldResumePermissionRequest)
         }
     }
 
     @discardableResult
     func setEnabled(_ shouldEnable: Bool, openPermissionsIfMissing: Bool = false) -> Bool {
-        guard shouldEnable else {
+        isEnabled = shouldEnable
+        TeamsCallBlockSettings.saveEnabled(shouldEnable)
+        return applyFeatureChange(openPermissionsIfMissing: openPermissionsIfMissing)
+    }
+
+    @discardableResult
+    func setControlScrollBlockEnabled(_ shouldEnable: Bool, openPermissionsIfMissing: Bool = false) -> Bool {
+        isControlScrollBlockEnabled = shouldEnable
+        TeamsCallBlockSettings.saveControlScrollEnabled(shouldEnable)
+        return applyFeatureChange(openPermissionsIfMissing: openPermissionsIfMissing)
+    }
+
+    private func applyFeatureChange(openPermissionsIfMissing: Bool) -> Bool {
+        guard hasEnabledProtection else {
             clearPendingEnableAfterPermission()
             stop()
-            isEnabled = false
-            TeamsCallBlockSettings.saveEnabled(false)
-            refreshPermissions()
             setStatus(permissionState.statusText)
             return false
         }
 
-        let started = startIfPossible()
-        if started {
+        if startIfPossible() {
             finishEnableSuccess()
-            return true
+        } else {
+            beginPendingEnableAfterPermission(openPermissionsIfMissing: openPermissionsIfMissing)
         }
-
-        beginPendingEnableAfterPermission(openPermissionsIfMissing: openPermissionsIfMissing)
-        return false
+        return true
     }
 
     func refreshPermissions() {
         permissionState = TeamsCallBlockPermissionState.current()
-        if isPendingEnableAfterPermission, !isEnabled {
+        if isPendingEnableAfterPermission {
             retryPendingEnableAfterPermission()
             return
         }
-        if isEnabled, eventTap != nil {
-            setStatus(permissionState.runningStatusText)
-        } else {
-            setStatus(permissionState.statusText)
-        }
+        setStatus(callProtectionStatusText)
     }
 
     func stop() {
@@ -353,10 +377,17 @@ final class MicrosoftTeamsCallBlocker: ObservableObject, @unchecked Sendable {
             NSWorkspace.shared.notificationCenter.removeObserver(workspaceObserver)
             self.workspaceObserver = nil
         }
-        windowRefreshTimer?.invalidate()
-        windowRefreshTimer = nil
+        if let screenParametersObserver {
+            NotificationCenter.default.removeObserver(screenParametersObserver)
+            self.screenParametersObserver = nil
+        }
+        removeTeamsAccessibilityObservers()
+        releaseCallbackContext()
+        isTeamsWindowRefreshScheduled = false
         permissionRetryTimer?.invalidate()
         permissionRetryTimer = nil
+        confirmationTask?.cancel()
+        confirmationTask = nil
         isTeamsActive = false
         teamsProcessIdentifiers.removeAll()
         teamsWindowFrames.removeAll()
@@ -364,50 +395,63 @@ final class MicrosoftTeamsCallBlocker: ObservableObject, @unchecked Sendable {
     }
 
     private func finishEnableSuccess() {
+        shouldContinuePermissionRequests = false
+        didRequestAccessibility = false
         isPendingEnableAfterPermission = false
         TeamsCallBlockSettings.savePendingEnableAfterPermission(false)
         permissionRetryTimer?.invalidate()
         permissionRetryTimer = nil
-        isEnabled = true
-        TeamsCallBlockSettings.saveEnabled(true)
-        setStatus(permissionState.runningStatusText)
+        permissionRetryCount = 0
+        setStatus(callProtectionStatusText)
     }
 
     private func beginPendingEnableAfterPermission(openPermissionsIfMissing: Bool) {
-        isEnabled = false
-        TeamsCallBlockSettings.saveEnabled(false)
         isPendingEnableAfterPermission = true
         TeamsCallBlockSettings.savePendingEnableAfterPermission(true)
         setStatus(permissionState.pendingEnableStatusText)
         startPermissionRetryTimer()
 
-        if openPermissionsIfMissing {
-            requestMissingPermission(for: permissionState)
-        }
+        shouldContinuePermissionRequests = openPermissionsIfMissing
+        requestCurrentPermissionIfNeeded()
     }
 
     private func clearPendingEnableAfterPermission() {
+        shouldContinuePermissionRequests = false
+        didRequestAccessibility = false
         isPendingEnableAfterPermission = false
         TeamsCallBlockSettings.savePendingEnableAfterPermission(false)
         permissionRetryTimer?.invalidate()
         permissionRetryTimer = nil
+        permissionRetryCount = 0
     }
 
     private func startPermissionRetryTimer() {
         guard permissionRetryTimer == nil else { return }
-        permissionRetryTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            self?.retryPendingEnableAfterPermission()
+        permissionRetryCount = 0
+        permissionRetryTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.permissionRetryCount += 1
+            self.retryPendingEnableAfterPermission()
+            if self.permissionRetryCount >= 60, !self.hasEnabledProtection {
+                self.permissionRetryTimer?.invalidate()
+                self.permissionRetryTimer = nil
+            }
         }
+        permissionRetryTimer?.tolerance = 0.25
     }
 
     private func retryPendingEnableAfterPermission() {
-        guard isPendingEnableAfterPermission, !isEnabled else {
+        guard isPendingEnableAfterPermission, hasEnabledProtection else {
             permissionRetryTimer?.invalidate()
             permissionRetryTimer = nil
             return
         }
 
+        let previousState = permissionState
         permissionState = TeamsCallBlockPermissionState.current()
+        if permissionState != previousState {
+            requestCurrentPermissionIfNeeded()
+        }
         if startIfPossible() {
             finishEnableSuccess()
             return
@@ -416,51 +460,72 @@ final class MicrosoftTeamsCallBlocker: ObservableObject, @unchecked Sendable {
         setStatus(permissionState.pendingEnableStatusText)
     }
 
+    private func requestCurrentPermissionIfNeeded() {
+        guard shouldContinuePermissionRequests,
+              permissionState == .missingAccessibility,
+              !didRequestAccessibility else {
+            return
+        }
+        didRequestAccessibility = true
+        requestMissingPermission(for: permissionState)
+    }
+
     private func startIfPossible() -> Bool {
         permissionState = TeamsCallBlockPermissionState.current()
 
-        if startEventTap() {
-            setStatus(permissionState.runningStatusText)
+        guard hasEnabledProtection else {
+            stop()
+            return true
+        }
+
+        // Creating an event tap before TCC is ready can trigger its own macOS
+        // permission alert. Keep permission requests in one explicit path.
+        guard permissionState.isReady else {
+            stopEventTap()
+            return false
+        }
+
+        installWorkspaceObservers()
+        refreshActiveApplication()
+        guard !isTeamsActive || eventTap != nil else {
+            setStatus(permissionState.eventMonitoringUnavailableText)
+            return false
+        }
+        return true
+    }
+
+    private func requestMissingPermission(for state: TeamsCallBlockPermissionState) {
+        switch state {
+        case .missingAccessibility:
+            let promptOption = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+            _ = AXIsProcessTrustedWithOptions([promptOption: true] as CFDictionary)
+        case .ready:
+            return
+        }
+    }
+
+    private func startEventTap() -> Bool {
+        let includesScrollWheel = isControlScrollBlockEnabled && isTeamsActive
+        if eventTap != nil, eventTapIncludesScrollWheel == includesScrollWheel {
             return true
         }
 
         stopEventTap()
-        setStatus(permissionState.eventMonitoringUnavailableText)
-        return false
-    }
 
-    private func requestMissingPermission(for state: TeamsCallBlockPermissionState) {
-        let urlString: String
-        switch state {
-        case .missingAccessibility, .missingAccessibilityAndInputMonitoring:
-            let promptOption = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
-            _ = AXIsProcessTrustedWithOptions([promptOption: true] as CFDictionary)
-            urlString = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
-        case .missingInputMonitoring:
-            _ = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
-            urlString = "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
-        case .ready:
-            return
+        var mask: CGEventMask = 0
+        if isEnabled {
+            mask |= CGEventMask(1 << CGEventType.leftMouseDown.rawValue)
+            mask |= CGEventMask(1 << CGEventType.leftMouseUp.rawValue)
         }
-
-        guard let url = URL(string: urlString) else { return }
-        NSWorkspace.shared.open(url)
-    }
-
-    private func startEventTap() -> Bool {
-        if eventTap != nil {
-            installWorkspaceObservers()
-            refreshActiveApplication()
-            return true
+        if includesScrollWheel {
+            mask |= CGEventMask(1 << CGEventType.scrollWheel.rawValue)
         }
-
-        let mask = CGEventMask(1 << CGEventType.leftMouseDown.rawValue)
-            | CGEventMask(1 << CGEventType.leftMouseUp.rawValue)
-            | CGEventMask(1 << CGEventType.scrollWheel.rawValue)
+        guard mask != 0 else { return true }
 
         let callback: CGEventTapCallBack = { proxy, type, event, userInfo in
             guard let userInfo else { return Unmanaged.passUnretained(event) }
-            let blocker = Unmanaged<MicrosoftTeamsCallBlocker>.fromOpaque(userInfo).takeUnretainedValue()
+            let context = Unmanaged<CallbackContext>.fromOpaque(userInfo).takeUnretainedValue()
+            guard let blocker = context.blocker else { return Unmanaged.passUnretained(event) }
             return blocker.handleEvent(proxy: proxy, type: type, event: event)
         }
 
@@ -468,14 +533,13 @@ final class MicrosoftTeamsCallBlocker: ObservableObject, @unchecked Sendable {
             ?? createEventTap(location: .cgSessionEventTap, mask: mask, callback: callback)
 
         guard let tap else { return false }
+        AppLog.teamsGuard.notice("Teams event tap started")
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
         eventTap = tap
         runLoopSource = source
-
-        installWorkspaceObservers()
-        refreshActiveApplication()
+        eventTapIncludesScrollWheel = includesScrollWheel
+        CGEvent.tapEnable(tap: tap, enable: true)
         return true
     }
 
@@ -490,8 +554,25 @@ final class MicrosoftTeamsCallBlocker: ObservableObject, @unchecked Sendable {
             options: .defaultTap,
             eventsOfInterest: mask,
             callback: callback,
-            userInfo: UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+            userInfo: callbackUserInfo()
         )
+    }
+
+    private func callbackUserInfo() -> UnsafeMutableRawPointer {
+        if let callbackContextPointer {
+            return callbackContextPointer
+        }
+        let pointer = UnsafeMutableRawPointer(
+            Unmanaged.passRetained(CallbackContext(blocker: self)).toOpaque()
+        )
+        callbackContextPointer = pointer
+        return pointer
+    }
+
+    private func releaseCallbackContext() {
+        guard let callbackContextPointer else { return }
+        self.callbackContextPointer = nil
+        Unmanaged<CallbackContext>.fromOpaque(callbackContextPointer).release()
     }
 
     private func stopEventTap() {
@@ -504,6 +585,7 @@ final class MicrosoftTeamsCallBlocker: ObservableObject, @unchecked Sendable {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
             self.runLoopSource = nil
         }
+        eventTapIncludesScrollWheel = false
     }
 
     private func installWorkspaceObservers() {
@@ -517,38 +599,224 @@ final class MicrosoftTeamsCallBlocker: ObservableObject, @unchecked Sendable {
                     self?.refreshActiveApplication()
                     return
                 }
-                self?.isTeamsActive = self?.isTeamsApplication(app) ?? false
-                self?.refreshTeamsWindows()
+                self?.updateActiveApplication(app)
             }
         }
 
-        if windowRefreshTimer == nil {
-            windowRefreshTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-                self?.refreshTeamsWindows()
+        if screenParametersObserver == nil {
+            screenParametersObserver = NotificationCenter.default.addObserver(
+                forName: NSApplication.didChangeScreenParametersNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.scheduleTeamsWindowRefresh()
             }
         }
     }
 
     private func refreshActiveApplication() {
-        guard let app = NSWorkspace.shared.frontmostApplication else {
-            isTeamsActive = false
-            refreshTeamsWindows()
+        updateActiveApplication(NSWorkspace.shared.frontmostApplication)
+    }
+
+    private func updateActiveApplication(_ app: NSRunningApplication?) {
+        isTeamsActive = app.map(isTeamsApplication) ?? false
+        guard isTeamsActive else {
+            removeTeamsAccessibilityObservers()
+            teamsProcessIdentifiers.removeAll()
+            teamsWindowFrames.removeAll()
+            _ = ensureEventTapForActiveApplication()
             return
         }
-        isTeamsActive = isTeamsApplication(app)
+
         refreshTeamsWindows()
+        installTeamsAccessibilityObservers()
+        guard ensureEventTapForActiveApplication() else {
+            setStatus(permissionState.eventMonitoringUnavailableText)
+            return
+        }
+        setEventTapEnabled(true)
+    }
+
+    @discardableResult
+    private func ensureEventTapForActiveApplication() -> Bool {
+        // Keep the global tap absent outside Teams. This avoids routing any
+        // Chrome or other-app input through GWS Menu at all.
+        guard hasEnabledProtection, isTeamsActive else {
+            stopEventTap()
+            return true
+        }
+
+        let needsScrollWheel = isControlScrollBlockEnabled
+        if eventTap != nil, eventTapIncludesScrollWheel == needsScrollWheel {
+            return true
+        }
+        return startEventTap()
+    }
+
+    private func setEventTapEnabled(_ enabled: Bool) {
+        guard let eventTap else { return }
+        CGEvent.tapEnable(tap: eventTap, enable: enabled)
+    }
+
+    private func installTeamsAccessibilityObservers() {
+        let activeProcessIdentifiers = teamsProcessIdentifiers
+        let staleProcessIdentifiers = teamsAccessibilityObservers.keys.filter {
+            !activeProcessIdentifiers.contains($0)
+        }
+        for processIdentifier in staleProcessIdentifiers {
+            removeTeamsAccessibilityObserver(for: processIdentifier)
+        }
+
+        let callback: AXObserverCallback = { observer, element, notification, userInfo in
+            guard let userInfo else { return }
+            let context = Unmanaged<CallbackContext>.fromOpaque(userInfo).takeUnretainedValue()
+            guard let blocker = context.blocker else { return }
+            blocker.handleTeamsAccessibilityNotification(
+                observer: observer,
+                element: element,
+                notification: notification as String
+            )
+        }
+        let userInfo = callbackUserInfo()
+
+        for processIdentifier in activeProcessIdentifiers where teamsAccessibilityObservers[processIdentifier] == nil {
+            var observer: AXObserver?
+            guard AXObserverCreate(processIdentifier, callback, &observer) == .success,
+                  let observer else {
+                enableInputDrivenWindowRefreshFallback()
+                continue
+            }
+
+            teamsAccessibilityObservers[processIdentifier] = observer
+            CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
+
+            let app = AXUIElementCreateApplication(processIdentifier)
+            addTeamsAccessibilityNotification(
+                observer,
+                element: app,
+                notification: kAXWindowCreatedNotification,
+                userInfo: userInfo
+            )
+            addTeamsAccessibilityNotification(
+                observer,
+                element: app,
+                notification: kAXFocusedWindowChangedNotification,
+                userInfo: userInfo
+            )
+            registerTeamsWindowNotifications(forApplication: app, observer: observer, userInfo: userInfo)
+        }
+    }
+
+    @discardableResult
+    private func addTeamsAccessibilityNotification(
+        _ observer: AXObserver,
+        element: AXUIElement,
+        notification: String,
+        userInfo: UnsafeMutableRawPointer
+    ) -> Bool {
+        let result = AXObserverAddNotification(observer, element, notification as CFString, userInfo)
+        let registered = result == .success || result == .notificationAlreadyRegistered
+        if !registered {
+            enableInputDrivenWindowRefreshFallback()
+        }
+        return registered
+    }
+
+    private func enableInputDrivenWindowRefreshFallback() {
+        guard !requiresInputDrivenWindowRefresh else { return }
+        requiresInputDrivenWindowRefresh = true
+        AppLog.teamsGuard.notice("Teams AX window notifications unavailable; using input-driven refresh")
+    }
+
+    private func registerTeamsWindowNotifications(
+        forApplication app: AXUIElement,
+        observer: AXObserver,
+        userInfo: UnsafeMutableRawPointer
+    ) {
+        for window in elementArrayAttribute(app, kAXWindowsAttribute).prefix(8) {
+            registerTeamsWindowNotifications(for: window, observer: observer, userInfo: userInfo)
+        }
+    }
+
+    private func registerTeamsWindowNotifications(
+        for window: AXUIElement,
+        observer: AXObserver,
+        userInfo: UnsafeMutableRawPointer
+    ) {
+        for notification in [kAXMovedNotification, kAXResizedNotification, kAXUIElementDestroyedNotification] {
+            addTeamsAccessibilityNotification(
+                observer,
+                element: window,
+                notification: notification,
+                userInfo: userInfo
+            )
+        }
+    }
+
+    private func handleTeamsAccessibilityNotification(
+        observer: AXObserver,
+        element: AXUIElement,
+        notification: String
+    ) {
+        guard isTeamsActive else { return }
+        if notification == kAXWindowCreatedNotification {
+            let userInfo = callbackUserInfo()
+            registerTeamsWindowNotifications(for: element, observer: observer, userInfo: userInfo)
+        } else if notification == kAXFocusedWindowChangedNotification {
+            var processIdentifier: pid_t = 0
+            if AXUIElementGetPid(element, &processIdentifier) == .success {
+                let app = AXUIElementCreateApplication(processIdentifier)
+                let userInfo = callbackUserInfo()
+                registerTeamsWindowNotifications(forApplication: app, observer: observer, userInfo: userInfo)
+            }
+        }
+        scheduleTeamsWindowRefresh()
+    }
+
+    private func scheduleTeamsWindowRefresh() {
+        guard isTeamsActive, !isTeamsWindowRefreshScheduled else { return }
+        isTeamsWindowRefreshScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.isTeamsWindowRefreshScheduled = false
+            guard self.isTeamsActive else { return }
+            self.refreshTeamsWindows()
+            self.installTeamsAccessibilityObservers()
+        }
+    }
+
+    private func removeTeamsAccessibilityObserver(for processIdentifier: pid_t) {
+        guard let observer = teamsAccessibilityObservers.removeValue(forKey: processIdentifier) else { return }
+        CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
+    }
+
+    private func removeTeamsAccessibilityObservers() {
+        for observer in teamsAccessibilityObservers.values {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
+        }
+        teamsAccessibilityObservers.removeAll()
+        requiresInputDrivenWindowRefresh = false
+        lastInputDrivenWindowRefreshAt = .distantPast
     }
 
     private func refreshTeamsWindows() {
+        guard isTeamsActive else {
+            teamsProcessIdentifiers.removeAll()
+            teamsWindowFrames.removeAll()
+            return
+        }
+
         let teamsApps = NSWorkspace.shared.runningApplications.filter(isTeamsApplication)
         teamsProcessIdentifiers = Set(teamsApps.map(\.processIdentifier))
         warmUpTeamsAccessibilityIfNeeded()
 
         guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else {
             teamsWindowFrames = []
+            lastTeamsWindowSnapshotAt = .distantPast
             return
         }
 
+        lastTeamsWindowSnapshotAt = Date()
         teamsWindowFrames = windows.compactMap { window in
             guard let ownerPid = window[kCGWindowOwnerPID as String] as? pid_t,
                   teamsProcessIdentifiers.contains(ownerPid),
@@ -569,10 +837,24 @@ final class MicrosoftTeamsCallBlocker: ObservableObject, @unchecked Sendable {
 
     private func handleEvent(proxy _: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            if let eventTap {
-                CGEvent.tapEnable(tap: eventTap, enable: true)
+            if type == .tapDisabledByTimeout {
+                AppLog.teamsGuard.error("Teams event tap timed out and is being re-enabled")
+            } else {
+                AppLog.teamsGuard.notice("Teams event tap was disabled by user input and is being re-enabled")
+            }
+            if isTeamsActive, hasEnabledProtection {
+                setEventTapEnabled(true)
             }
             return Unmanaged.passUnretained(event)
+        }
+
+        // Scroll must stay transparent outside the frontmost Teams window. In
+        // particular, this keeps Control-scroll browser zoom out of this guard.
+        if type == .scrollWheel {
+            guard isControlScrollBlockEnabled else {
+                return Unmanaged.passUnretained(event)
+            }
+            return handleScrollWheel(event)
         }
 
         guard isEnabled else {
@@ -583,13 +865,10 @@ final class MicrosoftTeamsCallBlocker: ObservableObject, @unchecked Sendable {
             return nil
         }
 
+        refreshTeamsWindowSnapshotForRelevantInputIfNeeded(type: type, event: event)
         let location = event.location
         guard isTeamsEvent(at: location) else {
             return Unmanaged.passUnretained(event)
-        }
-
-        if type == .scrollWheel {
-            return handleScrollWheel(event)
         }
 
         if type == .leftMouseUp, Date() < swallowMouseUpUntil {
@@ -612,23 +891,57 @@ final class MicrosoftTeamsCallBlocker: ObservableObject, @unchecked Sendable {
         swallowAllUntil = Date().addingTimeInterval(0.8)
         setStatus("Blocked a Teams call click.")
 
-        Task { @MainActor in
+        confirmationTask?.cancel()
+        confirmationTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled,
+                  self.isEnabled,
+                  self.isTeamsEvent(at: location) else {
+                return
+            }
             self.confirmThenClick(at: location)
+            self.confirmationTask = nil
         }
 
         return nil
     }
 
+    private func refreshTeamsWindowSnapshotForRelevantInputIfNeeded(type: CGEventType, event: CGEvent) {
+        let isRelevantInput = type == .leftMouseDown
+        guard isTeamsActive, isRelevantInput else { return }
+
+        let now = Date()
+        let isOutsideKnownWindow = !teamsWindowFrames.isEmpty
+            && !teamsWindowFrames.contains(where: { $0.contains(event.location) })
+        let isSnapshotStale = now.timeIntervalSince(lastTeamsWindowSnapshotAt) >= windowSnapshotStaleInterval
+        guard isOutsideKnownWindow || requiresInputDrivenWindowRefresh || isSnapshotStale else { return }
+
+        if !isOutsideKnownWindow,
+           now.timeIntervalSince(lastInputDrivenWindowRefreshAt) < inputDrivenWindowRefreshInterval {
+            return
+        }
+        lastInputDrivenWindowRefreshAt = now
+        refreshTeamsWindows()
+        installTeamsAccessibilityObservers()
+    }
+
     private func isTeamsEvent(at location: CGPoint) -> Bool {
+        guard isTeamsActive,
+              let frontmostApplication = NSWorkspace.shared.frontmostApplication,
+              isTeamsApplication(frontmostApplication) else {
+            return false
+        }
+
         if teamsWindowFrames.contains(where: { $0.contains(location) }) {
             return true
         }
-        return isTeamsActive && teamsWindowFrames.isEmpty
+        return teamsWindowFrames.isEmpty
     }
 
     private func handleScrollWheel(_ event: CGEvent) -> Unmanaged<CGEvent>? {
-        guard controlKeyIsDown(for: event) else {
+        guard isControlScrollBlockEnabled,
+              controlKeyIsDown(for: event),
+              isFrontmostTeamsWindow(at: event.location) else {
             return Unmanaged.passUnretained(event)
         }
 
@@ -637,15 +950,20 @@ final class MicrosoftTeamsCallBlocker: ObservableObject, @unchecked Sendable {
     }
 
     private func controlKeyIsDown(for event: CGEvent) -> Bool {
-        if event.flags.contains(.maskControl) {
-            return true
+        event.flags.contains(.maskControl)
+    }
+
+    private func isFrontmostTeamsWindow(at location: CGPoint) -> Bool {
+        guard isTeamsActive,
+              let frontmostApplication = NSWorkspace.shared.frontmostApplication,
+              isTeamsApplication(frontmostApplication) else {
+            return false
         }
 
-        if CGEventSource.flagsState(.hidSystemState).contains(.maskControl) {
-            return true
-        }
-
-        return CGEventSource.flagsState(.combinedSessionState).contains(.maskControl)
+        // A missing window snapshot is never sufficient reason to suppress an
+        // input event. At worst, a newly opened Teams window gets one normal
+        // Control-scroll; other apps are never affected.
+        return teamsWindowFrames.contains(where: { $0.contains(location) })
     }
 
     private func isTeamsElement(_ element: AXUIElement) -> Bool {
@@ -687,34 +1005,30 @@ final class MicrosoftTeamsCallBlocker: ObservableObject, @unchecked Sendable {
     }
 
     private func isRiskyCallClick(at location: CGPoint) -> Bool {
-        for target in accessibilityCandidates(at: location) {
-            guard isTeamsElement(target), isRiskyCallElement(target) else {
-                continue
+        if let hitElement = accessibilityElement(at: location),
+           isTeamsElement(hitElement) {
+            if isRiskyCallElement(hitElement) {
+                return true
             }
-            return true
-        }
-        return false
-    }
-
-    private func accessibilityCandidates(at location: CGPoint) -> [AXUIElement] {
-        var candidates: [AXUIElement] = []
-        if let hitElement = accessibilityElement(at: location) {
-            candidates.append(hitElement)
+            if callActionRoles.contains(stringAttribute(hitElement, kAXRoleAttribute)) {
+                return false
+            }
         }
 
-        candidates.append(contentsOf: scannedAccessibilityCandidates(at: location))
-        return candidates
+        return scannedAccessibilityCandidates(at: location).contains { target in
+            isTeamsElement(target) && isRiskyCallElement(target)
+        }
     }
 
     private func scannedAccessibilityCandidates(at location: CGPoint) -> [AXUIElement] {
         warmUpTeamsAccessibilityIfNeeded()
 
         var matches: [(element: AXUIElement, area: CGFloat)] = []
-        var remainingBudget = 900
+        var remainingBudget = 360
 
         for processIdentifier in teamsProcessIdentifiers {
             let app = AXUIElementCreateApplication(processIdentifier)
-            for window in elementArrayAttribute(app, kAXWindowsAttribute).prefix(4) {
+            for window in elementArrayAttribute(app, kAXWindowsAttribute).prefix(2) {
                 collectInteractiveElements(
                     in: window,
                     at: location,
@@ -738,7 +1052,7 @@ final class MicrosoftTeamsCallBlocker: ObservableObject, @unchecked Sendable {
         remainingBudget: inout Int,
         matches: inout [(element: AXUIElement, area: CGFloat)]
     ) {
-        guard depth <= 12, remainingBudget > 0 else { return }
+        guard depth <= 10, remainingBudget > 0 else { return }
         remainingBudget -= 1
 
         let frame = elementFrame(element)
@@ -752,7 +1066,7 @@ final class MicrosoftTeamsCallBlocker: ObservableObject, @unchecked Sendable {
         }
 
         let children = elementArrayAttribute(element, kAXChildrenAttribute)
-        for child in children.prefix(40) {
+        for child in children.prefix(32) {
             collectInteractiveElements(
                 in: child,
                 at: location,
@@ -954,10 +1268,12 @@ final class MicrosoftTeamsCallBlocker: ObservableObject, @unchecked Sendable {
 
     private func setStatus(_ newStatus: String) {
         if Thread.isMainThread {
+            guard statusText != newStatus else { return }
             statusText = newStatus
             TeamsCallBlockSettings.saveStatusText(newStatus)
         } else {
             DispatchQueue.main.async {
+                guard self.statusText != newStatus else { return }
                 self.statusText = newStatus
                 TeamsCallBlockSettings.saveStatusText(newStatus)
             }

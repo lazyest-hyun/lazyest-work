@@ -9,7 +9,7 @@ GOOGLE_RESTORE_ON_OPEN="auto"
 
 usage() {
   cat <<USAGE
-Usage: scripts/install-macos-app.sh [--user|--system] [--no-open] [--restore-google-on-open] [--skip-google-restore-on-open] [--ad-hoc]
+Usage: scripts/install-macos-app.sh [--user|--system] [--no-open] [--restore-google-on-open] [--skip-google-restore-on-open] [--distribution] [--ad-hoc]
 
 Builds GWS Menu and installs the app bundle.
 
@@ -20,10 +20,12 @@ Options:
   --restore-google-on-open  Restore Google sign-in from Keychain on the first launch after install
   --skip-google-restore-on-open
                             Skip Google sign-in restore once after install
-  --ad-hoc                  Use ad-hoc signing. This can invalidate macOS Accessibility/Input Monitoring grants after rebuilds.
+  --distribution            Require the publisher Google OAuth configuration
+  --ad-hoc                  Use ad-hoc signing. This can invalidate macOS Accessibility grants after rebuilds.
 
 Environment variables accepted by scripts/build-macos-app.sh are forwarded:
   GWS_BUNDLE_ID
+  GWS_BUILD_MODE
   GWS_GOOGLE_CLIENT_ID
   GWS_GOOGLE_REVERSED_CLIENT_ID
   GWS_MICROSOFT_CLIENT_ID
@@ -51,8 +53,11 @@ while [[ $# -gt 0 ]]; do
     --skip-google-restore-on-open)
       GOOGLE_RESTORE_ON_OPEN="skip"
       ;;
+    --distribution)
+      export GWS_BUILD_MODE="distribution"
+      ;;
     --ad-hoc)
-      echo "Warning: --ad-hoc can make macOS treat each rebuild as a different app for Accessibility/Input Monitoring." >&2
+      echo "Warning: --ad-hoc can make macOS treat each rebuild as a different app for Accessibility." >&2
       export GWS_CODESIGN_IDENTITY="-"
       ;;
     -h|--help)
@@ -76,73 +81,40 @@ fi
 DEST_APP="$INSTALL_DIR/$APP_NAME"
 SYSTEM_APP="/Applications/$APP_NAME"
 USER_APP="$HOME/Applications/$APP_NAME"
+
+# Preserve a custom local bundle ID so URL callbacks, UserDefaults, and macOS
+# privacy grants keep referring to the same app after a source update. Public
+# distribution builds always use explicitly supplied publisher configuration.
+if [[ "${GWS_BUILD_MODE:-local}" != "distribution" && -z "${GWS_BUNDLE_ID:-}" ]]; then
+  for existing_app in "$DEST_APP" "$SYSTEM_APP" "$USER_APP"; do
+    existing_plist="$existing_app/Contents/Info.plist"
+    [[ -f "$existing_plist" ]] || continue
+    existing_bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$existing_plist" 2>/dev/null || true)"
+    if [[ "$existing_bundle_id" =~ ^[A-Za-z0-9.-]+$ ]]; then
+      export GWS_BUNDLE_ID="$existing_bundle_id"
+      break
+    fi
+  done
+fi
+
+BUNDLE_ID="${GWS_BUNDLE_ID:-io.github.gwsmenu.app}"
 HAD_EXISTING_APP=0
 if [[ -d "$DEST_APP" || -d "$SYSTEM_APP" || -d "$USER_APP" ]]; then
   HAD_EXISTING_APP=1
 fi
-EXISTING_INFO_PLISTS=("$DEST_APP/Contents/Info.plist")
-if [[ "$DEST_APP" != "$USER_APP" ]]; then
-  EXISTING_INFO_PLISTS+=("$USER_APP/Contents/Info.plist")
-fi
-if [[ "$DEST_APP" != "$SYSTEM_APP" ]]; then
-  EXISTING_INFO_PLISTS+=("$SYSTEM_APP/Contents/Info.plist")
-fi
-PLIST_BUDDY="/usr/libexec/PlistBuddy"
 
-read_info_value() {
-  local key="$1"
-  [[ -x "$PLIST_BUDDY" ]] || return 0
-  local plist value
-  for plist in "${EXISTING_INFO_PLISTS[@]}"; do
-    [[ -f "$plist" ]] || continue
-    value="$("$PLIST_BUDDY" -c "Print :$key" "$plist" 2>/dev/null || true)"
-    if [[ -n "$value" ]]; then
-      echo "$value"
-      return 0
+# A local rebuild may reuse the publisher Client ID already embedded in this
+# developer's installed copy. Distribution builds never inherit bundle config.
+if [[ "${GWS_BUILD_MODE:-local}" != "distribution" && -z "${GWS_GOOGLE_CLIENT_ID:-}" ]]; then
+  for existing_app in "$DEST_APP" "$SYSTEM_APP" "$USER_APP"; do
+    existing_plist="$existing_app/Contents/Info.plist"
+    [[ -f "$existing_plist" ]] || continue
+    existing_client_id="$(/usr/libexec/PlistBuddy -c 'Print :GIDClientID' "$existing_plist" 2>/dev/null || true)"
+    if [[ "$existing_client_id" == *.apps.googleusercontent.com && "$existing_client_id" != *YOUR_GOOGLE_CLIENT_ID* ]]; then
+      export GWS_GOOGLE_CLIENT_ID="$existing_client_id"
+      break
     fi
   done
-}
-
-read_google_url_scheme() {
-  [[ -x "$PLIST_BUDDY" ]] || return 0
-  local plist type_index scheme_index scheme
-  for plist in "${EXISTING_INFO_PLISTS[@]}"; do
-    [[ -f "$plist" ]] || continue
-    for type_index in {0..20}; do
-      for scheme_index in {0..20}; do
-        scheme="$("$PLIST_BUDDY" -c "Print :CFBundleURLTypes:$type_index:CFBundleURLSchemes:$scheme_index" "$plist" 2>/dev/null || true)"
-        if [[ "$scheme" == com.googleusercontent.apps.* && "$scheme" != *YOUR_GOOGLE_CLIENT_ID* ]]; then
-          echo "$scheme"
-          return 0
-        fi
-      done
-    done
-  done
-}
-
-if [[ -z "${GWS_BUNDLE_ID:-}" ]]; then
-  EXISTING_BUNDLE_ID="$(read_info_value "CFBundleIdentifier")"
-  if [[ -n "$EXISTING_BUNDLE_ID" ]]; then
-    export GWS_BUNDLE_ID="$EXISTING_BUNDLE_ID"
-  fi
-fi
-
-if [[ -z "${GWS_BUNDLE_ID:-}" ]]; then
-  export GWS_BUNDLE_ID="io.github.gwsmenu.app"
-fi
-
-if [[ -z "${GWS_GOOGLE_CLIENT_ID:-}" ]]; then
-  EXISTING_CLIENT_ID="$(read_info_value "GIDClientID")"
-  if [[ "$EXISTING_CLIENT_ID" == *.apps.googleusercontent.com && "$EXISTING_CLIENT_ID" != *YOUR_GOOGLE_CLIENT_ID* ]]; then
-    export GWS_GOOGLE_CLIENT_ID="$EXISTING_CLIENT_ID"
-  fi
-fi
-
-if [[ -z "${GWS_GOOGLE_REVERSED_CLIENT_ID:-}" ]]; then
-  EXISTING_REVERSED_CLIENT_ID="$(read_google_url_scheme)"
-  if [[ -n "$EXISTING_REVERSED_CLIENT_ID" ]]; then
-    export GWS_GOOGLE_REVERSED_CLIENT_ID="$EXISTING_REVERSED_CLIENT_ID"
-  fi
 fi
 
 BUILD_LOG="$(mktemp -t gws-menu-build.XXXXXX)"
@@ -177,7 +149,7 @@ if [[ "$INSTALL_SCOPE" == "system" && -d "$USER_APP" ]]; then
   rm -rf "$USER_APP"
 fi
 
-# Refresh Launch Services so URL-scheme changes from Open Setup are picked up.
+# Register the callback URL schemes embedded by the build.
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 if [[ -x "$LSREGISTER" ]]; then
   "$LSREGISTER" -f "$DEST_APP" >/dev/null 2>&1 || true
@@ -202,9 +174,9 @@ if [[ "$OPEN_AFTER_INSTALL" -eq 1 ]]; then
   esac
 
   if [[ "$SKIP_GOOGLE_RESTORE_ON_OPEN" -eq 1 ]]; then
-    /usr/bin/defaults write "$GWS_BUNDLE_ID" gwsSkipGoogleRestoreOnce -bool true
+    /usr/bin/defaults write "$BUNDLE_ID" gwsSkipGoogleRestoreOnce -bool true
   else
-    /usr/bin/defaults delete "$GWS_BUNDLE_ID" gwsSkipGoogleRestoreOnce >/dev/null 2>&1 || true
+    /usr/bin/defaults delete "$BUNDLE_ID" gwsSkipGoogleRestoreOnce >/dev/null 2>&1 || true
   fi
   /usr/bin/open "$DEST_APP"
 fi
