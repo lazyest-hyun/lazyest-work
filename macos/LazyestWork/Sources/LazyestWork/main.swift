@@ -2369,7 +2369,7 @@ struct LazyestWorkPopover: View {
     }
 
     private func openGitHub() {
-        guard let url = URL(string: "https://github.com/hyunn515/gws-menu-app") else { return }
+        guard let url = URL(string: "https://github.com/hyunn515/lazyest-work") else { return }
         onOpenURL(url)
     }
 

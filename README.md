@@ -20,7 +20,7 @@ Native macOS menu bar app for Google Workspace shortcuts, read-only Google Calen
 This repository distributes source, not a prebuilt release. An AI agent can build the current source, install it into `/Applications`, launch it, and remove the temporary checkout with one command:
 
 ```sh
-(workdir="$(mktemp -d)" && trap 'rm -rf "$workdir"' EXIT && git clone --depth 1 --quiet https://github.com/hyunn515/gws-menu-app.git "$workdir" && "$workdir/scripts/install-macos-app.sh")
+(workdir="$(mktemp -d)" && trap 'rm -rf "$workdir"' EXIT && git clone --depth 1 --quiet https://github.com/hyunn515/lazyest-work.git "$workdir" && "$workdir/scripts/install-macos-app.sh")
 ```
 
 The bundle identifier remains stable across the rename so an existing installation keeps its macOS permissions and Keychain session. Fresh source builds need publisher Google OAuth configuration before Google sign-in is available.
@@ -28,8 +28,8 @@ The bundle identifier remains stable across the rename so an existing installati
 For local development:
 
 ```bash
-git clone https://github.com/hyunn515/gws-menu-app.git
-cd gws-menu-app
+git clone https://github.com/hyunn515/lazyest-work.git
+cd lazyest-work
 GWS_GOOGLE_CLIENT_ID="<publisher-client-id>" \
   swift scripts/sync-google-app-icons.swift --accept-google-brand-terms
 ```
