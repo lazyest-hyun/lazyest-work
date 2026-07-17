@@ -14,10 +14,10 @@ For now, report privately to the repository owner. Include:
 
 ## Credential Handling
 
-GWS Menu does not require a Google client secret. Native apps are public OAuth
+Lazyest Work does not require a Google client secret. Native apps are public OAuth
 clients. User sign-in state is handled through Google Sign-In and Keychain.
 Calendar access is read-only. The optional Gmail badge uses Gmail label unread
-counts only, not message sender, subject, body, or attachments. GWS Menu does not
+counts only, not message sender, subject, body, or attachments. Lazyest Work does not
 send desktop mail alerts in the public-safe scope set.
 
 Do not commit:

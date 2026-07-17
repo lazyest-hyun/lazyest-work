@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_DIR="$ROOT_DIR/dist/GWSMenu.app"
+APP_DIR="$ROOT_DIR/dist/Lazyest Work.app"
 BUNDLE_ID="${GWS_BUNDLE_ID:-io.github.gwsmenu.app}"
 GOOGLE_CLIENT_ID="${GWS_GOOGLE_CLIENT_ID:-}"
 SIGNING_IDENTITY="${GWS_CODESIGN_IDENTITY:-}"
@@ -72,7 +72,7 @@ grep -E '^CodeDirectory .*flags=.*runtime' <<<"$SIGNATURE_INFO" >/dev/null ||
 
 VERSION="$(plutil -extract CFBundleShortVersionString raw -o - "$APP_DIR/Contents/Info.plist")"
 [[ "$VERSION" =~ ^[A-Za-z0-9._-]+$ ]] || die "App version cannot be used in a release filename: $VERSION"
-ZIP_PATH="${GWS_RELEASE_ZIP:-$ROOT_DIR/dist/GWSMenu-$VERSION-macOS.zip}"
+ZIP_PATH="${GWS_RELEASE_ZIP:-$ROOT_DIR/dist/LazyestWork-$VERSION-macOS.zip}"
 mkdir -p "$(dirname "$ZIP_PATH")"
 
 # notarytool receives a ZIP of the signed, unstapled app.

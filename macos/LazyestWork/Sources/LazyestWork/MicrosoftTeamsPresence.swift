@@ -2,7 +2,7 @@ import AuthenticationServices
 import AppKit
 import CryptoKit
 import Foundation
-import GWSMenuCore
+import LazyestWorkCore
 import Security
 
 struct MicrosoftSetupConfig: Equatable {

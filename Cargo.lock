@@ -190,7 +190,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "gws-core"
+name = "lazyest-work-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -200,13 +200,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "gws-menu-cli"
+name = "lazyest-work-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
  "clap",
- "gws-core",
+ "lazyest-work-core",
  "serde",
  "serde_json",
 ]

@@ -175,18 +175,18 @@ enum TeamsCallBlockPermissionState: Equatable {
     var eventMonitoringUnavailableText: String {
         switch self {
         case .missingAccessibility:
-            return "Off. Accessibility permission is not detected for GWS Menu."
+            return "Off. Accessibility permission is not detected for Lazyest Work."
         case .ready:
-            return "Off. macOS did not allow event monitoring. Quit and reopen GWS Menu."
+            return "Off. macOS did not allow event monitoring. Quit and reopen Lazyest Work."
         }
     }
 
     var pendingEnableStatusText: String {
         switch self {
         case .missingAccessibility:
-            return "Waiting for Accessibility permission. Enable GWS Menu in System Settings."
+            return "Waiting for Accessibility permission. Enable Lazyest Work in System Settings."
         case .ready:
-            return "Waiting for macOS event monitoring. GWS Menu will turn on Teams call block automatically."
+            return "Waiting for macOS event monitoring. Lazyest Work will turn on Teams call block automatically."
         }
     }
 
@@ -640,7 +640,7 @@ final class MicrosoftTeamsCallBlocker: ObservableObject, @unchecked Sendable {
     @discardableResult
     private func ensureEventTapForActiveApplication() -> Bool {
         // Keep the global tap absent outside Teams. This avoids routing any
-        // Chrome or other-app input through GWS Menu at all.
+        // Chrome or other-app input through Lazyest Work at all.
         guard hasEnabledProtection, isTeamsActive else {
             stopEventTap()
             return true

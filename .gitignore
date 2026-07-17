@@ -1,7 +1,8 @@
 /target/
 /.build/
 /dist/
-/macos/GWSMenuBar/.build/
+/.codex/
+/macos/LazyestWork/.build/
 /.DS_Store
 *.xcuserdata/
 
@@ -29,4 +30,4 @@ client_secret*.json
 *.swp
 
 # Generated local brand assets. Do not commit third-party product icons.
-/macos/GWSMenuBar/Sources/GWSMenuBar/Resources/WorkspaceIcons/*.png
+/macos/LazyestWork/Sources/LazyestWork/Resources/WorkspaceIcons/*.png

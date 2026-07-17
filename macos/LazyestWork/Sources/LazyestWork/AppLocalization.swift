@@ -47,7 +47,7 @@ struct AppText {
     var languageLabel: String { s("Language", "언어") }
     var languageSubtitle: String { s("Choose the app display language.", "앱 표시 언어를 선택합니다.") }
     var openAtLogin: String { s("Open at login", "로그인 시 열기") }
-    var openAtLoginSubtitle: String { s("Start GWS Menu when you sign in to macOS.", "macOS 로그인 시 GWS Menu를 시작합니다.") }
+    var openAtLoginSubtitle: String { s("Start Lazyest Work when you sign in to macOS.", "macOS 로그인 시 Lazyest Work를 시작합니다.") }
     var githubRepository: String { s("GitHub repository", "GitHub 저장소") }
     var githubRepositorySubtitle: String { s("Open releases, issues, and source updates.", "릴리스, 이슈, 소스 업데이트를 엽니다.") }
     var open: String { s("Open", "열기") }
@@ -113,8 +113,8 @@ struct AppText {
     var callConfirmTitle: String { s("Start Teams call?", "Teams 통화를 시작할까요?") }
     var callConfirmMessage: String {
         s(
-            "GWS Menu blocked an accidental click. Continue to run the Teams call button once.",
-            "GWS Menu가 실수 클릭을 막았습니다. 계속하면 방금 누른 Teams 통화 버튼을 한 번 실행합니다."
+            "Lazyest Work blocked an accidental click. Continue to run the Teams call button once.",
+            "Lazyest Work가 실수 클릭을 막았습니다. 계속하면 방금 누른 Teams 통화 버튼을 한 번 실행합니다."
         )
     }
     var callConfirmAction: String { s("Start call", "통화 시작") }
@@ -152,13 +152,13 @@ struct AppText {
             return "꺼짐. Teams 통화를 차단하려면 손쉬운 사용 권한이 필요합니다."
         case "On. Teams calls require confirmation.":
             return "켜짐"
-        case "Off. Accessibility permission is not detected for GWS Menu.":
-            return "꺼짐. GWS Menu의 손쉬운 사용 권한이 감지되지 않았습니다."
-        case "Off. macOS did not allow event monitoring. Quit and reopen GWS Menu.":
-            return "꺼짐. macOS가 이벤트 모니터링을 허용하지 않았습니다. GWS Menu를 다시 여세요."
-        case "Waiting for Accessibility permission. Enable GWS Menu in System Settings.":
-            return "손쉬운 사용 권한을 기다리는 중입니다. 시스템 설정에서 GWS Menu를 켜세요."
-        case "Waiting for macOS event monitoring. GWS Menu will turn on Teams call block automatically.":
+        case "Off. Accessibility permission is not detected for Lazyest Work.":
+            return "꺼짐. Lazyest Work의 손쉬운 사용 권한이 감지되지 않았습니다."
+        case "Off. macOS did not allow event monitoring. Quit and reopen Lazyest Work.":
+            return "꺼짐. macOS가 이벤트 모니터링을 허용하지 않았습니다. Lazyest Work를 다시 여세요."
+        case "Waiting for Accessibility permission. Enable Lazyest Work in System Settings.":
+            return "손쉬운 사용 권한을 기다리는 중입니다. 시스템 설정에서 Lazyest Work를 켜세요."
+        case "Waiting for macOS event monitoring. Lazyest Work will turn on Teams call block automatically.":
             return "macOS 이벤트 모니터링을 기다리는 중입니다. 준비되면 Teams 통화 차단을 자동으로 켭니다."
         case "Blocked a Teams call click.":
             return "Teams 통화 클릭을 차단했습니다."

@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_NAME="GWSMenu.app"
+APP_NAME="Lazyest Work.app"
+LEGACY_APP_NAME="GWSMenu.app"
 INSTALL_SCOPE="system"
 OPEN_AFTER_INSTALL=1
 GOOGLE_RESTORE_ON_OPEN="auto"
@@ -11,7 +12,7 @@ usage() {
   cat <<USAGE
 Usage: scripts/install-macos-app.sh [--user|--system] [--no-open] [--restore-google-on-open] [--skip-google-restore-on-open] [--distribution] [--ad-hoc]
 
-Builds GWS Menu and installs the app bundle.
+Builds Lazyest Work and installs the app bundle.
 
 Options:
   --system                  Install to /Applications (default, may require admin permissions)
@@ -81,12 +82,14 @@ fi
 DEST_APP="$INSTALL_DIR/$APP_NAME"
 SYSTEM_APP="/Applications/$APP_NAME"
 USER_APP="$HOME/Applications/$APP_NAME"
+LEGACY_SYSTEM_APP="/Applications/$LEGACY_APP_NAME"
+LEGACY_USER_APP="$HOME/Applications/$LEGACY_APP_NAME"
 
 # Preserve a custom local bundle ID so URL callbacks, UserDefaults, and macOS
 # privacy grants keep referring to the same app after a source update. Public
 # distribution builds always use explicitly supplied publisher configuration.
 if [[ "${GWS_BUILD_MODE:-local}" != "distribution" && -z "${GWS_BUNDLE_ID:-}" ]]; then
-  for existing_app in "$DEST_APP" "$SYSTEM_APP" "$USER_APP"; do
+  for existing_app in "$DEST_APP" "$SYSTEM_APP" "$USER_APP" "$LEGACY_SYSTEM_APP" "$LEGACY_USER_APP"; do
     existing_plist="$existing_app/Contents/Info.plist"
     [[ -f "$existing_plist" ]] || continue
     existing_bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$existing_plist" 2>/dev/null || true)"
@@ -99,14 +102,14 @@ fi
 
 BUNDLE_ID="${GWS_BUNDLE_ID:-io.github.gwsmenu.app}"
 HAD_EXISTING_APP=0
-if [[ -d "$DEST_APP" || -d "$SYSTEM_APP" || -d "$USER_APP" ]]; then
+if [[ -d "$DEST_APP" || -d "$SYSTEM_APP" || -d "$USER_APP" || -d "$LEGACY_SYSTEM_APP" || -d "$LEGACY_USER_APP" ]]; then
   HAD_EXISTING_APP=1
 fi
 
 # A local rebuild may reuse the publisher Client ID already embedded in this
 # developer's installed copy. Distribution builds never inherit bundle config.
 if [[ "${GWS_BUILD_MODE:-local}" != "distribution" && -z "${GWS_GOOGLE_CLIENT_ID:-}" ]]; then
-  for existing_app in "$DEST_APP" "$SYSTEM_APP" "$USER_APP"; do
+  for existing_app in "$DEST_APP" "$SYSTEM_APP" "$USER_APP" "$LEGACY_SYSTEM_APP" "$LEGACY_USER_APP"; do
     existing_plist="$existing_app/Contents/Info.plist"
     [[ -f "$existing_plist" ]] || continue
     existing_client_id="$(/usr/libexec/PlistBuddy -c 'Print :GIDClientID' "$existing_plist" 2>/dev/null || true)"
@@ -117,7 +120,7 @@ if [[ "${GWS_BUILD_MODE:-local}" != "distribution" && -z "${GWS_GOOGLE_CLIENT_ID
   done
 fi
 
-BUILD_LOG="$(mktemp -t gws-menu-build.XXXXXX)"
+BUILD_LOG="$(mktemp -t lazyest-work-build.XXXXXX)"
 trap 'rm -f "$BUILD_LOG"' EXIT
 "$ROOT_DIR/scripts/build-macos-app.sh" 2>&1 | tee "$BUILD_LOG"
 BUILT_APP="$(tail -n 1 "$BUILD_LOG")"
@@ -129,14 +132,17 @@ fi
 
 mkdir -p "$INSTALL_DIR"
 
-if /usr/bin/pgrep -x "GWSMenu" >/dev/null 2>&1; then
-  /usr/bin/pkill -x "GWSMenu" || true
+if /usr/bin/pgrep -x "LazyestWork" >/dev/null 2>&1; then
+  /usr/bin/pkill -x "LazyestWork" || true
   for _ in {1..20}; do
-    if ! /usr/bin/pgrep -x "GWSMenu" >/dev/null 2>&1; then
+    if ! /usr/bin/pgrep -x "LazyestWork" >/dev/null 2>&1; then
       break
     fi
     sleep 0.1
   done
+fi
+if /usr/bin/pgrep -x "GWSMenu" >/dev/null 2>&1; then
+  /usr/bin/pkill -x "GWSMenu" || true
 fi
 
 if [[ -d "$DEST_APP" ]]; then
@@ -144,6 +150,11 @@ if [[ -d "$DEST_APP" ]]; then
 fi
 
 /usr/bin/ditto "$BUILT_APP" "$DEST_APP"
+for legacy_app in "$LEGACY_SYSTEM_APP" "$LEGACY_USER_APP"; do
+  if [[ -d "$legacy_app" ]]; then
+    rm -rf "$legacy_app"
+  fi
+done
 
 if [[ "$INSTALL_SCOPE" == "system" && -d "$USER_APP" ]]; then
   rm -rf "$USER_APP"

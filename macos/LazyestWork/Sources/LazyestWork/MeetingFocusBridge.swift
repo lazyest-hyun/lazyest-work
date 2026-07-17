@@ -1,5 +1,5 @@
 import Foundation
-import GWSMenuCore
+import LazyestWorkCore
 
 private final class ShortcutProcessOutput: @unchecked Sendable {
     private static let byteLimit = 1_048_576

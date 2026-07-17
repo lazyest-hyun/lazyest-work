@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
-cat > "$TMPDIR/TestGWSMenuCore.swift" <<'SWIFT'
+cat > "$TMPDIR/TestLazyestWorkCore.swift" <<'SWIFT'
 import Foundation
 
 struct StubEvent: MenuEventRepresentable, FocusEventRepresentable {
@@ -31,7 +31,7 @@ func expectEqual<T: Equatable>(_ actual: T, _ expected: T, _ message: String) {
 }
 
 @main
-struct GWSMenuCoreBehaviorTest {
+struct LazyestWorkCoreBehaviorTest {
     static func main() {
         let ids = (1...9).map { "app-\($0)" }
         expectEqual(
@@ -81,17 +81,17 @@ struct GWSMenuCoreBehaviorTest {
         expectEqual(
             MeetingNotificationPolicy.shouldSuppressNotifications(events: [needsAction, accepted, declined], at: focusNow),
             true,
-            "accepted current meeting suppresses GWS Menu notifications"
+            "accepted current meeting suppresses Lazyest Work notifications"
         )
         expectEqual(
             MeetingNotificationPolicy.shouldSuppressNotifications(events: [needsAction, declined], at: focusNow),
             false,
-            "needs-action and declined meetings do not suppress GWS Menu notifications"
+            "needs-action and declined meetings do not suppress Lazyest Work notifications"
         )
         expectEqual(
             MeetingNotificationPolicy.shouldSuppressNotifications(events: [allDay, future, noMeetingSignal], at: focusNow),
             false,
-            "all-day, future, and non-meeting focus blocks do not suppress GWS Menu notifications"
+            "all-day, future, and non-meeting focus blocks do not suppress Lazyest Work notifications"
         )
         expectEqual(
             MeetingNotificationPolicy.shouldSuppressNotifications(events: [accepted], at: accepted.start),
@@ -196,14 +196,14 @@ struct GWSMenuCoreBehaviorTest {
         expectEqual(changingGmailPlan.nextStep(observedCount: 2), .wait(5), "new Gmail count starts a fresh stable window")
         expectEqual(changingGmailPlan.nextStep(observedCount: 2), .stopBecauseCountSettled, "new Gmail count settles cleanly")
 
-        print("PASS: GWSMenuCore behavior")
+        print("PASS: LazyestWorkCore behavior")
     }
 }
 SWIFT
 
 swiftc \
-  "$ROOT/macos/GWSMenuBar/Sources/GWSMenuCore/GWSMenuCore.swift" \
-  "$ROOT/macos/GWSMenuBar/Sources/GWSMenuCore/GmailUnreadReconciliationPlan.swift" \
-  "$TMPDIR/TestGWSMenuCore.swift" \
-  -o "$TMPDIR/gws-menu-core-test"
-"$TMPDIR/gws-menu-core-test"
+  "$ROOT/macos/LazyestWork/Sources/LazyestWorkCore/LazyestWorkCore.swift" \
+  "$ROOT/macos/LazyestWork/Sources/LazyestWorkCore/GmailUnreadReconciliationPlan.swift" \
+  "$TMPDIR/TestLazyestWorkCore.swift" \
+  -o "$TMPDIR/lazyest-work-core-test"
+"$TMPDIR/lazyest-work-core-test"

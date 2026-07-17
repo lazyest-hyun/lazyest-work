@@ -1,7 +1,7 @@
 [workspace]
 members = [
-  "crates/gws-core",
-  "crates/gws-cli",
+  "crates/lazyest-work-core",
+  "crates/lazyest-work-cli",
 ]
 resolver = "3"
 

@@ -1,13 +1,13 @@
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
-use gws_core::google::{
+use lazyest_work_core::google::{
     FreeBusyRequest, InsertEventRequest, calendar_resources_url, events_insert_url, freebusy_url,
 };
 
 #[derive(Debug, Parser)]
-#[command(name = "gws-menu-cli")]
-#[command(about = "Development helper for GWS Menu's Rust core")]
+#[command(name = "lazyest-work-cli")]
+#[command(about = "Development helper for Lazyest Work's Rust core")]
 struct Args {
     #[command(subcommand)]
     command: Command,

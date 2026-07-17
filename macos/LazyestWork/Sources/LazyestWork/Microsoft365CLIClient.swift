@@ -1,5 +1,5 @@
 import Foundation
-import GWSMenuCore
+import LazyestWorkCore
 
 struct Microsoft365CLIStatus: Decodable {
     let connectedAs: String?

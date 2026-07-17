@@ -36,17 +36,17 @@ For the GitHub Release artifact, store notarization credentials once with `notar
 GWS_GOOGLE_CLIENT_ID="<publisher-client-id>" \
 GWS_CODESIGN_IDENTITY="Developer ID Application: ... (<apple-team-id>)" \
 GWS_TEAM_ID="<apple-team-id>" \
-GWS_NOTARY_PROFILE="gws-menu-notary" \
+GWS_NOTARY_PROFILE="lazyest-work-notary" \
 scripts/package-macos-release.sh
 ```
 
 The packaging script signs with the hardened runtime, submits the ZIP to Apple, staples the accepted ticket to the app, validates it with Gatekeeper, and then recreates the final release ZIP. `Apple Distribution` certificates are intentionally rejected because they are for App Store workflows, not direct GitHub distribution.
 
-Local development builds may reuse the publisher ID embedded in an existing `/Applications/GWSMenu.app`. This compatibility behavior is never used for a distribution artifact.
+Local development builds may reuse the publisher ID embedded in an existing `/Applications/Lazyest Work.app`. This compatibility behavior is never used for a distribution artifact.
 
 ## Microsoft Graph
 
-Teams status is optional. Without a native Microsoft client ID, GWS Menu uses Microsoft 365 CLI with Microsoft's first-party Microsoft Graph Command Line Tools app ID (`14d82eec-204b-4c2f-b7e8-296a70dab67e`). The installer does not preserve a Microsoft client ID from older app bundles; include `GWS_MICROSOFT_CLIENT_ID` and optionally `GWS_MICROSOFT_TENANT_ID` only when distributing a build with an organization-approved Microsoft Graph client.
+Teams status is optional. Without a native Microsoft client ID, Lazyest Work uses Microsoft 365 CLI with Microsoft's first-party Microsoft Graph Command Line Tools app ID (`14d82eec-204b-4c2f-b7e8-296a70dab67e`). The installer does not preserve a Microsoft client ID from older app bundles; include `GWS_MICROSOFT_CLIENT_ID` and optionally `GWS_MICROSOFT_TENANT_ID` only when distributing a build with an organization-approved Microsoft Graph client.
 
 ## Security
 

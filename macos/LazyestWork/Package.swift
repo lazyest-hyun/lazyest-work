@@ -3,13 +3,13 @@
 import PackageDescription
 
 let package = Package(
-    name: "GWSMenuBar",
+    name: "LazyestWork",
     platforms: [
         .macOS(.v14)
     ],
     products: [
-        .library(name: "GWSMenuCore", targets: ["GWSMenuCore"]),
-        .executable(name: "GWSMenu", targets: ["GWSMenuBar"])
+        .library(name: "LazyestWorkCore", targets: ["LazyestWorkCore"]),
+        .executable(name: "LazyestWork", targets: ["LazyestWork"])
     ],
     dependencies: [
         .package(url: "https://github.com/google/GoogleSignIn-iOS.git", from: "9.0.0"),
@@ -17,17 +17,17 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "GWSMenuCore",
-            path: "Sources/GWSMenuCore"
+            name: "LazyestWorkCore",
+            path: "Sources/LazyestWorkCore"
         ),
         .executableTarget(
-            name: "GWSMenuBar",
+            name: "LazyestWork",
             dependencies: [
-                "GWSMenuCore",
+                "LazyestWorkCore",
                 .product(name: "GoogleSignIn", package: "GoogleSignIn-iOS"),
                 .product(name: "GTMAppAuth", package: "GTMAppAuth")
             ],
-            path: "Sources/GWSMenuBar",
+            path: "Sources/LazyestWork",
             resources: [
                 .process("Resources")
             ]

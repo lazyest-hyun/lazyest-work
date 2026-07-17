@@ -2,7 +2,7 @@
 
 ## Raycast Do Not Disturb Shortcut
 
-GWS Menu bundles the `DND Raycast.shortcut` helper from the Raycast extensions repository so users can install the required macOS Focus helper from inside the app.
+Lazyest Work bundles the `DND Raycast.shortcut` helper from the Raycast extensions repository so users can install the required macOS Focus helper from inside the app.
 
 - Source: `raycast/extensions`, `extensions/do-not-disturb/assets/DND Raycast.shortcut`
 - License: MIT

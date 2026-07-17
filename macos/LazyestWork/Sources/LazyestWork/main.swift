@@ -4,7 +4,7 @@ import Foundation
 #if GWS_LOCAL_FILE_KEYCHAIN
 import GTMAppAuth
 #endif
-import GWSMenuCore
+import LazyestWorkCore
 #if GWS_LOCAL_FILE_KEYCHAIN
 import ObjectiveC
 #endif
@@ -153,6 +153,13 @@ private enum AppDateFormatters {
         formatter.timeStyle = .short
         return formatter
     }
+    private static let compactDate = LockedFormatter {
+        let formatter = DateFormatter()
+        formatter.locale = .autoupdatingCurrent
+        formatter.timeZone = .autoupdatingCurrent
+        formatter.setLocalizedDateFormatFromTemplate("MMM d")
+        return formatter
+    }
     private static let timeInterval = LockedFormatter {
         let formatter = DateIntervalFormatter()
         formatter.locale = .autoupdatingCurrent
@@ -175,6 +182,10 @@ private enum AppDateFormatters {
 
     static func shortTimeString(from date: Date) -> String {
         shortTime.use { $0.string(from: date) }
+    }
+
+    static func compactDateString(from date: Date) -> String {
+        compactDate.use { $0.string(from: date) }
     }
 
     static func timeIntervalString(from start: Date, to end: Date) -> String {
@@ -353,7 +364,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        AppLog.lifecycle.notice("GWS Menu launched")
+        AppLog.lifecycle.notice("Lazyest Work launched")
         NSApp.setActivationPolicy(.accessory)
         UNUserNotificationCenter.current().delegate = self
         configureApplicationMenu()
@@ -410,7 +421,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             height: min(maximumHeight, PopoverLayout.minimumHomeHeight)
         )
         let hostingController = NSHostingController(
-            rootView: GWSMenuPopover(
+            rootView: LazyestWorkPopover(
                 model: model,
                 maximumHeight: maximumHeight,
                 onPreferredHeightChange: { [weak self] height in
@@ -439,7 +450,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 onRefreshTeamsCallBlockPermissions: { [weak self] in self?.refreshTeamsCallBlockPermissions() },
                 onUpdateMailBadge: { [weak self] isEnabled in self?.updateMailBadgeEnabled(isEnabled) },
                 onUpdateLaunchAtLogin: { [weak self] isEnabled in self?.updateLaunchAtLoginEnabled(isEnabled) },
-                onOpenURL: { [weak self] url in self?.openURLFromMenu(url) }
+                onOpenURL: { [weak self] url in self?.openURLFromMenu(url) },
+                onOpenWorkspaceURL: { [weak self] url in self?.openWorkspaceURLFromMenu(url) }
             )
         )
         hostingController.sizingOptions = []
@@ -473,8 +485,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
         let appMenuItem = NSMenuItem()
         mainMenu.addItem(appMenuItem)
-        let appMenu = NSMenu(title: "GWS Menu")
-        appMenu.addItem(NSMenuItem(title: "Quit GWS Menu", action: #selector(quit), keyEquivalent: "q"))
+        let appMenu = NSMenu(title: "Lazyest Work")
+        appMenu.addItem(NSMenuItem(title: "Quit Lazyest Work", action: #selector(quit), keyEquivalent: "q"))
         appMenuItem.submenu = appMenu
 
         let editMenuItem = NSMenuItem()
@@ -610,6 +622,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 model.lastError = nil
                 model.lastErrorRecovery = nil
             }
+        } catch let error where isExpectedCancellation(error) {
+            AppLog.calendar.debug("Calendar refresh cancelled")
         } catch {
             AppLog.calendar.error("Calendar refresh failed: \(error.localizedDescription, privacy: .private)")
             let errorMessage = userFacingError(error)
@@ -680,7 +694,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private func updateTitle() {
         switch model.connectionState {
         case .loading:
-            setStatusTitle("", toolTip: "Loading GWS Menu")
+            setStatusTitle("", toolTip: "Loading Lazyest Work")
         case .missingBundleConfig:
             setStatusTitle("", toolTip: "Google Sign-In is not configured")
         case .signedOut:
@@ -761,6 +775,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         NSWorkspace.shared.open(url)
     }
 
+    private func openWorkspaceURLFromMenu(_ url: URL) {
+        // Opening a Google app hands focus to Chrome. Keep the menu-bar
+        // interaction complete instead of leaving its popover floating above it.
+        popover.performClose(nil)
+        openURLFromMenu(url)
+    }
+
     private func setStatusTitle(_ title: String, toolTip: String?) {
         guard let button = statusItem.button else { return }
         let imagePosition: NSControl.ImagePosition = title.isEmpty ? .imageOnly : .imageLeading
@@ -807,6 +828,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 } else {
                     model.gmailUnreadCount = nil
                 }
+            } catch let error where isExpectedCancellation(error) {
+                AppLog.lifecycle.debug("Scheduled refresh cancelled")
             } catch {
                 model.lastError = userFacingError(error)
                 model.lastErrorRecovery = googleRecoveryAction(for: error)
@@ -937,7 +960,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 try meetingFocusBridge.openHelperInstaller()
                 model.meetingFocusHelperInstalled = false
                 model.meetingFocusApprovalPending = true
-                model.lastError = "Click Add Shortcut once in macOS. GWS Menu turns Do Not Disturb on automatically after approval."
+                model.lastError = "Click Add Shortcut once in macOS. Lazyest Work turns Do Not Disturb on automatically after approval."
                 model.lastErrorRecovery = nil
                 refreshUI()
                 watchForMeetingFocusApproval()
@@ -1365,6 +1388,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                     teamsConnected: teamsConnected
                 )
                 refreshMicrosoftConnectionState(allowCLIStatusCheck: automationEnabled)
+            } catch let error where isExpectedCancellation(error) {
+                AppLog.teamsPresence.debug("Teams presence sync cancelled")
             } catch {
                 model.lastError = userFacingError(error)
                 model.lastErrorRecovery = nil
@@ -1454,8 +1479,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             model.launchAtLoginEnabled = LaunchAtLoginSettings.isEnabled()
             if isEnabled, LaunchAtLoginSettings.status == .requiresApproval {
                 model.lastError = text.s(
-                    "Allow GWS Menu in Login Items.",
-                    "로그인 항목에서 GWS Menu를 허용하세요."
+                    "Allow Lazyest Work in Login Items.",
+                    "로그인 항목에서 Lazyest Work를 허용하세요."
                 )
                 model.lastErrorRecovery = .loginItemsSettings
             }
@@ -1475,6 +1500,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         do {
             try await ensureNotificationAuthorization()
             try await scheduleCalendarNotifications()
+        } catch let error where isExpectedCancellation(error) {
+            AppLog.calendar.debug("Calendar notification sync cancelled")
         } catch {
             model.calendarNotificationsEnabled = false
             model.lastError = userFacingError(error)
@@ -1544,7 +1571,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             try await ensureNotificationAuthorization()
 
             let content = UNMutableNotificationContent()
-            content.title = "GWS Menu"
+            content.title = "Lazyest Work"
             content.subtitle = "Test meeting alert"
             content.body = "Meeting notifications are working."
             content.sound = .default
@@ -1555,7 +1582,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
             let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 1, repeats: false)
             let request = UNNotificationRequest(
-                identifier: "gws-menu-test-\(UUID().uuidString)",
+                identifier: "lazyest-work-test-\(UUID().uuidString)",
                 content: content,
                 trigger: trigger
             )
@@ -1669,6 +1696,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             model.gmailErrorRecovery = nil
             refreshUI()
             return unreadCount
+        } catch let error where isExpectedCancellation(error) {
+            AppLog.gmail.debug("Gmail unread refresh cancelled")
+            return nil
         } catch {
             AppLog.gmail.error("Gmail unread refresh failed: \(error.localizedDescription, privacy: .private)")
             let recovery = gmailRecoveryAction(for: error)
@@ -1801,7 +1831,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     private func showStatusMenu(anchor: NSStatusBarButton) {
         let menu = NSMenu()
-        let quit = NSMenuItem(title: "Quit GWS Menu", action: #selector(quit), keyEquivalent: "q")
+        let quit = NSMenuItem(title: "Quit Lazyest Work", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.bounds.minY), in: anchor)
@@ -1848,8 +1878,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
         if lowercased.contains("redirect_uri_mismatch") || lowercased.contains("url scheme") {
             return text.s(
-                "Google could not return to GWS Menu. Install the latest build.",
-                "Google이 GWS Menu로 돌아오지 못했습니다. 최신 빌드를 설치하세요."
+                "Google could not return to Lazyest Work. Install the latest build.",
+                "Google이 Lazyest Work로 돌아오지 못했습니다. 최신 빌드를 설치하세요."
             )
         }
         if lowercased.contains("homebrew") {
@@ -1906,6 +1936,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             return "Calendar permission was not granted. Try Sign in again and allow read-only Google Calendar access."
         }
         return message
+    }
+
+    private func isExpectedCancellation(_ error: Error) -> Bool {
+        if error is CancellationError {
+            return true
+        }
+        let nsError = error as NSError
+        return nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled
     }
 
     private func googleRecoveryAction(for error: Error) -> ErrorRecoveryAction? {
@@ -2014,7 +2052,7 @@ private struct HomeContentHeightPreferenceKey: PreferenceKey {
     }
 }
 
-struct GWSMenuPopover: View {
+struct LazyestWorkPopover: View {
     @ObservedObject var model: AppModel
     @State private var screen = PopoverScreen.home
     @State private var editorID = UUID()
@@ -2048,6 +2086,7 @@ struct GWSMenuPopover: View {
     let onUpdateMailBadge: (Bool) -> Void
     let onUpdateLaunchAtLogin: (Bool) -> Void
     let onOpenURL: (URL) -> Void
+    let onOpenWorkspaceURL: (URL) -> Void
 
     var body: some View {
         Group {
@@ -2058,9 +2097,9 @@ struct GWSMenuPopover: View {
                 AppSettingsView(
                     connectionState: model.connectionState,
                     isBusy: model.isBusy,
-                    errorMessage: model.lastError,
+                    errorMessage: presentedLastError,
                     errorRecovery: model.lastErrorRecovery,
-                    gmailErrorMessage: model.gmailError,
+                    gmailErrorMessage: presentedGmailError,
                     gmailErrorRecovery: model.gmailErrorRecovery,
                     initialAlertLeadMinutes: model.alertLeadMinutes,
                     initialCalendarNotificationsEnabled: model.calendarNotificationsEnabled,
@@ -2173,7 +2212,7 @@ struct GWSMenuPopover: View {
                         isExpanded: isWorkspaceExpanded,
                         onToggleExpanded: { isWorkspaceExpanded.toggle() },
                         onManageApps: openWorkspaceSettings,
-                        onOpenURL: onOpenURL
+                        onOpenURL: onOpenWorkspaceURL
                     )
                     .padding(.horizontal, 16)
                     .padding(.top, 14)
@@ -2182,8 +2221,8 @@ struct GWSMenuPopover: View {
                     MenuDivider()
 
                     VStack(alignment: .leading, spacing: 14) {
-                    if let lastError = model.lastError ?? model.gmailError {
-                        let recovery = model.lastError == nil
+                    if let lastError = presentedLastError ?? presentedGmailError {
+                        let recovery = presentedLastError == nil
                             ? model.gmailErrorRecovery
                             : model.lastErrorRecovery
                         ErrorBanner(
@@ -2229,7 +2268,7 @@ struct GWSMenuPopover: View {
                         now: model.now,
                         isExpanded: isUpcomingExpanded,
                         onToggleExpanded: { isUpcomingExpanded.toggle() },
-                        onOpenURL: onOpenURL
+                        onOpenURL: onOpenWorkspaceURL
                     )
                     }
                     .padding(16)
@@ -2263,6 +2302,25 @@ struct GWSMenuPopover: View {
             !model.launchAtLoginEnabled
 
         return missingGoogleOptions || missingLocalOptions
+    }
+
+    private var presentedLastError: String? {
+        presentableError(model.lastError)
+    }
+
+    private var presentedGmailError: String? {
+        presentableError(model.gmailError)
+    }
+
+    private func presentableError(_ message: String?) -> String? {
+        guard let message else { return nil }
+        let normalized = message.lowercased()
+        guard !normalized.contains("cancellationerror"),
+              !normalized.contains("cancelled"),
+              !normalized.contains("canceled") else {
+            return nil
+        }
+        return message
     }
 
     private func openAppSettings() {
@@ -2424,7 +2482,7 @@ struct HeaderView: View {
                 .scaledToFit()
                 .frame(width: 18, height: 18)
 
-            Text("GWS Menu")
+            Text("Lazyest Work")
                 .font(.system(size: 13, weight: .semibold))
 
             Text(text.googleAccountLine(connectionState))
@@ -2600,7 +2658,7 @@ struct FinishSetupCard: View {
                 )
                 FinishSetupOptionRow(
                     title: "Open at login",
-                    subtitle: "Start GWS Menu when you sign in to macOS.",
+                    subtitle: "Start Lazyest Work when you sign in to macOS.",
                     systemImage: "power",
                     isEnabled: launchAtLoginEnabled,
                     isBusy: false,
@@ -2900,9 +2958,23 @@ struct UpcomingEventsView: View {
         MenuSectionVisibility.visibleUpcomingEvents(events, now: now, isExpanded: isExpanded)
     }
 
+    private var visibleEventGroups: [EventDayGroup] {
+        let calendar = Calendar.autoupdatingCurrent
+        var groups: [EventDayGroup] = []
+        for event in visibleEvents {
+            let day = calendar.startOfDay(for: event.start)
+            if groups.last?.id == day {
+                groups[groups.count - 1].events.append(event)
+            } else {
+                groups.append(EventDayGroup(id: day, events: [event]))
+            }
+        }
+        return groups
+    }
+
     var body: some View {
         if !events.isEmpty {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
                     SectionTitle(text.s("Upcoming", "다가오는 일정"))
                     Spacer()
@@ -2922,66 +2994,142 @@ struct UpcomingEventsView: View {
                         .padding(10)
                         .menuSurface(.inset)
                 } else {
-                    VStack(spacing: 8) {
-                        ForEach(visibleEvents, id: \.id) { event in
-                            EventRow(event: event, now: now, language: language, onOpenURL: onOpenURL)
+                    VStack(alignment: .leading, spacing: 7) {
+                        ForEach(visibleEventGroups) { group in
+                            VStack(alignment: .leading, spacing: 4) {
+                                if let firstEvent = group.events.first {
+                                    HStack(spacing: 4) {
+                                        Text(firstEvent.dayText(relativeTo: now, language: language))
+                                            .font(.system(size: 10, weight: .bold))
+                                            .foregroundStyle(Color.accentColor)
+                                        Text("· \(AppDateFormatters.compactDateString(from: group.id))")
+                                            .font(.system(size: 10, weight: .regular))
+                                            .foregroundStyle(.secondary)
+                                    }
+                                        .padding(.leading, 2)
+                                }
+
+                                ForEach(group.events, id: \.id) { event in
+                                    EventRow(event: event, language: language, onOpenURL: onOpenURL)
+                                }
+                            }
                         }
                     }
                 }
             }
         }
     }
+
+}
+
+private struct EventDayGroup: Identifiable {
+    let id: Date
+    var events: [MeetingEvent]
+}
+
+private enum EventRowMetrics {
+    static let primaryFont = Font.system(size: 12, weight: .semibold)
+    static let secondaryFont = Font.system(size: 11, weight: .regular)
+    static let primaryHeight: CGFloat = 18
+    static let secondaryHeight: CGFloat = 16
+    static let lineSpacing: CGFloat = 2
+    static let contentHeight = primaryHeight + lineSpacing + secondaryHeight
 }
 
 struct EventRow: View {
     let event: MeetingEvent
-    let now: Date
     let language: AppLanguage
     let onOpenURL: (URL) -> Void
-    @Environment(\.colorScheme) private var colorScheme
+    private var text: AppText { AppText(language: language) }
     @State private var isShowingParticipants = false
 
+    private var secondaryText: String? {
+        if let room = event.roomLine {
+            return room
+        }
+        if let calendarName = event.calendarName?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty {
+            return calendarName
+        }
+        return nil
+    }
+
     var body: some View {
-        HStack(spacing: 10) {
-            VStack(spacing: 2) {
-                Text(event.startTimeText)
-                    .font(.system(size: 12, weight: .semibold))
-                    .monospacedDigit()
-                Text(event.dayText(relativeTo: now, language: language))
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.secondary)
+        rowContent
+            .contextMenu {
+                if let meetingURL = event.meetingURL {
+                    Button(text.s("Join meeting", "회의 입장")) { onOpenURL(meetingURL) }
+                }
+                if let htmlLink = event.htmlLink, htmlLink != event.meetingURL {
+                    Button(text.s("Open event", "일정 열기")) { onOpenURL(htmlLink) }
+                }
             }
-            .frame(width: 58, height: 44)
-            .menuSurface(.inset)
+    }
 
-            VStack(alignment: .leading, spacing: 3) {
+    private var rowContent: some View {
+        HStack(alignment: .top, spacing: 7) {
+            EventTimeColumn(event: event)
+
+            Capsule()
+                .fill(event.selfResponseStatus.indicatorColor)
+                .frame(width: 3, height: EventRowMetrics.contentHeight)
+                .help(event.selfResponseStatus.helpText)
+
+            VStack(alignment: .leading, spacing: EventRowMetrics.lineSpacing) {
                 HStack(spacing: 5) {
-                    Circle()
-                        .fill(event.selfResponseStatus.indicatorColor)
-                        .frame(width: 7, height: 7)
-                        .help(event.selfResponseStatus.helpText)
-
                     Text(event.title)
-                        .font(.system(size: 13, weight: .medium))
+                        .font(EventRowMetrics.primaryFont)
                         .lineLimit(1)
                         .layoutPriority(1)
                         .help(event.title)
 
-                    if let participantSummary = event.participantSummary {
+                    Spacer(minLength: 6)
+
+                    if let meetingURL = event.meetingURL {
+                        EventIconButton(
+                            symbolName: "video.fill",
+                            title: text.s("Join meeting", "회의 입장"),
+                            action: { onOpenURL(meetingURL) }
+                        )
+                    }
+
+                    if let htmlLink = event.htmlLink {
+                        EventIconButton(
+                            symbolName: "info.circle",
+                            title: text.s("Open event", "일정 열기"),
+                            action: { onOpenURL(htmlLink) }
+                        )
+                    }
+                }
+                .frame(height: EventRowMetrics.primaryHeight)
+
+                HStack(spacing: 7) {
+                    if let secondaryText {
+                        Text(secondaryText)
+                            .font(EventRowMetrics.secondaryFont)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .layoutPriority(1)
+                            .help(secondaryText)
+                    }
+
+                    if let participantText = event.participantCompactText {
+                        if secondaryText != nil {
+                            Divider()
+                                .frame(height: 12)
+                        }
+
                         Button {
                             isShowingParticipants.toggle()
                         } label: {
                             HStack(spacing: 3) {
-                                Text(participantSummary)
-                                    .font(.system(size: 10, weight: .semibold))
+                                Image(systemName: "person.2")
+                                Text(participantText)
                                     .lineLimit(1)
-                                Image(systemName: "chevron.up")
+                                Image(systemName: "chevron.down")
                                     .font(.system(size: 7, weight: .bold))
                             }
+                            .font(EventRowMetrics.secondaryFont)
                             .foregroundStyle(.secondary)
-                            .padding(.horizontal, 5)
-                            .frame(height: 16)
-                            .background(MenuAppearance.surfaceFill(.inset, colorScheme: colorScheme), in: Capsule())
                         }
                         .buttonStyle(.plain)
                         .help(event.participantToolTip)
@@ -2994,27 +3142,55 @@ struct EventRow: View {
                         }
                     }
                 }
-                Text(event.detailLine)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .help(event.detailLine)
+                .frame(height: EventRowMetrics.secondaryHeight)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-
-            HStack(spacing: 4) {
-                if let meetingURL = event.meetingURL {
-                    IconButton(symbolName: "video.fill", title: "Join", action: { onOpenURL(meetingURL) })
-                }
-
-                if let htmlLink = event.htmlLink {
-                    IconButton(symbolName: "info.circle", title: "Details", action: { onOpenURL(htmlLink) })
-                }
-            }
-            .frame(width: 60, alignment: .trailing)
         }
-        .padding(9)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
         .menuSurface()
+    }
+}
+
+struct EventTimeColumn: View {
+    let event: MeetingEvent
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: EventRowMetrics.lineSpacing) {
+            Text(event.startTimeText)
+                .font(EventRowMetrics.primaryFont)
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
+                .frame(height: EventRowMetrics.primaryHeight)
+            Text("- \(event.endTimeText)")
+                .font(EventRowMetrics.secondaryFont)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
+                .frame(height: EventRowMetrics.secondaryHeight)
+        }
+        .frame(height: EventRowMetrics.contentHeight, alignment: .topLeading)
+        .fixedSize(horizontal: true, vertical: false)
+        .help(event.timeText)
+    }
+}
+
+struct EventIconButton: View {
+    let symbolName: String
+    let title: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbolName)
+                .font(.system(size: 11, weight: .semibold))
+                .frame(width: 18, height: 18)
+        }
+        .buttonStyle(.borderless)
+        .accessibilityLabel(Text(title))
+        .help(title)
     }
 }
 
@@ -3027,7 +3203,7 @@ struct ParticipantPopover: View {
                 Text("Participants")
                     .font(.system(size: 12, weight: .semibold))
                 Spacer()
-                Text(event.participantSummary ?? "")
+                Text(event.participantCompactText ?? "")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.secondary)
             }
@@ -4310,7 +4486,7 @@ struct WorkspaceApp: Identifiable, Codable, Equatable {
     }
 
     private static func workspaceResourceBundleCandidates() -> [URL] {
-        let bundleName = "GWSMenuBar_GWSMenuBar.bundle"
+        let bundleName = "LazyestWork_LazyestWork.bundle"
         var candidates: [URL] = []
 
         if let resourceURL = Bundle.main.resourceURL {
@@ -4401,7 +4577,17 @@ enum WorkspaceAppStore {
     static var configURL: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
-        return base.appendingPathComponent("GWS Menu", isDirectory: true).appendingPathComponent("workspace-apps.json")
+        let current = base.appendingPathComponent("Lazyest Work", isDirectory: true).appendingPathComponent("workspace-apps.json")
+        let legacy = base.appendingPathComponent("GWS Menu", isDirectory: true).appendingPathComponent("workspace-apps.json")
+        if !FileManager.default.fileExists(atPath: current.path),
+           FileManager.default.fileExists(atPath: legacy.path) {
+            try? FileManager.default.createDirectory(
+                at: current.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try? FileManager.default.copyItem(at: legacy, to: current)
+        }
+        return current
     }
 
     static func load() -> [WorkspaceApp] {
@@ -4506,7 +4692,7 @@ enum InstallLaunchSettings {
 }
 
 enum AppResourceLocator {
-    private static let resourceBundleName = "GWSMenuBar_GWSMenuBar.bundle"
+    private static let resourceBundleName = "LazyestWork_LazyestWork.bundle"
 
     static func url(named name: String, extension fileExtension: String, subdirectory: String? = nil) -> URL? {
         for bundleURL in resourceBundleCandidates() {
@@ -4921,7 +5107,7 @@ final class AuthWindow {
             backing: .buffered,
             defer: false
         )
-        window.title = "GWS Menu"
+        window.title = "Lazyest Work"
         window.center()
         window.isReleasedWhenClosed = false
 
@@ -5418,6 +5604,10 @@ struct MeetingEvent: Equatable {
         AppDateFormatters.shortTimeString(from: start)
     }
 
+    var endTimeText: String {
+        AppDateFormatters.shortTimeString(from: end)
+    }
+
     var detailLine: String {
         [timeText, roomLine, calendarName]
             .compactMap { value in
@@ -5436,6 +5626,18 @@ struct MeetingEvent: Equatable {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .nilIfEmpty
             .map { "by \($0.truncated(maxLength: 18))" }
+        return [hostText, guestText]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty }
+            .joined(separator: " ")
+            .nilIfEmpty
+    }
+
+    var participantCompactText: String? {
+        let hostText = organizerName?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfEmpty
+            .map { $0.truncated(maxLength: 14) }
+        let guestText = guestCount > 0 ? "+\(guestCount)" : nil
         return [hostText, guestText]
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty }
             .joined(separator: " ")

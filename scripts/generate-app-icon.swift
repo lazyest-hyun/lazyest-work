@@ -7,8 +7,8 @@ let scriptPath = CommandLine.arguments.first ?? "scripts/generate-app-icon.swift
 let scriptURL = URL(fileURLWithPath: scriptPath, relativeTo: URL(fileURLWithPath: FileManager.default.currentDirectoryPath))
     .standardizedFileURL
 let rootURL = scriptURL.deletingLastPathComponent().deletingLastPathComponent()
-let assetsURL = rootURL.appendingPathComponent("macos/GWSMenuBar/Assets", isDirectory: true)
-let iconsetURL = FileManager.default.temporaryDirectory.appendingPathComponent("GWSMenu-AppIcon-\(UUID().uuidString).iconset", isDirectory: true)
+let assetsURL = rootURL.appendingPathComponent("macos/LazyestWork/Assets", isDirectory: true)
+let iconsetURL = FileManager.default.temporaryDirectory.appendingPathComponent("LazyestWork-AppIcon-\(UUID().uuidString).iconset", isDirectory: true)
 let outputURL = assetsURL.appendingPathComponent("AppIcon.icns")
 
 try FileManager.default.createDirectory(at: assetsURL, withIntermediateDirectories: true)
@@ -125,7 +125,7 @@ func drawIcon(pixels: Int, to url: URL) throws {
     guard let tiff = image.tiffRepresentation,
           let bitmap = NSBitmapImageRep(data: tiff),
           let png = bitmap.representation(using: .png, properties: [:]) else {
-        throw NSError(domain: "GWSMenuIcon", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to render icon PNG"])
+        throw NSError(domain: "LazyestWorkIcon", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to render icon PNG"])
     }
     try png.write(to: url)
 }
@@ -141,7 +141,7 @@ try process.run()
 process.waitUntilExit()
 
 if process.terminationStatus != 0 {
-    throw NSError(domain: "GWSMenuIcon", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: "iconutil failed"])
+    throw NSError(domain: "LazyestWorkIcon", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: "iconutil failed"])
 }
 
 print(outputURL.path)

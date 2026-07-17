@@ -1,6 +1,6 @@
 import AppKit
 import Foundation
-import GWSMenuCore
+import LazyestWorkCore
 
 enum RemoteRefreshTrigger: String, Sendable {
     case popoverOpened

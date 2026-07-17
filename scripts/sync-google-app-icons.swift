@@ -26,7 +26,7 @@ let args = Set(CommandLine.arguments.dropFirst())
 guard args.contains(acceptedFlag) else {
     fputs("""
     This script downloads Google product icon assets for local/internal use only,
-    then installs GWS Menu into /Applications.
+    then installs Lazyest Work into /Applications.
 
     The public repository intentionally does not ship third-party brand assets.
     Before running this, review Google's brand/trademark rules and make sure your
@@ -52,7 +52,7 @@ let scriptURL = URL(fileURLWithPath: CommandLine.arguments[0], relativeTo: URL(f
     .standardizedFileURL
 let rootDirectory = scriptURL.deletingLastPathComponent().deletingLastPathComponent()
 let outputDirectory = rootDirectory
-    .appendingPathComponent("macos/GWSMenuBar/Sources/GWSMenuBar/Resources/WorkspaceIcons", isDirectory: true)
+    .appendingPathComponent("macos/LazyestWork/Sources/LazyestWork/Resources/WorkspaceIcons", isDirectory: true)
 let scale = 2
 let iconSize = 53 * scale
 
@@ -102,7 +102,7 @@ func downloadData(from sourceURL: URL) throws -> Data {
     let semaphore = DispatchSemaphore(value: 0)
     var result: Result<Data, Error>!
     var request = URLRequest(url: sourceURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
-    request.setValue("GWSMenuIconSync/1.0", forHTTPHeaderField: "User-Agent")
+    request.setValue("LazyestWorkIconSync/1.0", forHTTPHeaderField: "User-Agent")
 
     let task = URLSession.shared.dataTask(with: request) { data, response, error in
         defer { semaphore.signal() }
@@ -114,7 +114,7 @@ func downloadData(from sourceURL: URL) throws -> Data {
               (200..<300).contains(http.statusCode) else {
             let status = (response as? HTTPURLResponse)?.statusCode ?? -1
             result = .failure(NSError(
-                domain: "GWSMenuIconSync",
+                domain: "LazyestWorkIconSync",
                 code: status,
                 userInfo: [NSLocalizedDescriptionKey: "Download failed with HTTP \(status) for \(sourceURL.absoluteString)"]
             ))
@@ -122,7 +122,7 @@ func downloadData(from sourceURL: URL) throws -> Data {
         }
         guard let data, !data.isEmpty else {
             result = .failure(NSError(
-                domain: "GWSMenuIconSync",
+                domain: "LazyestWorkIconSync",
                 code: 6,
                 userInfo: [NSLocalizedDescriptionKey: "Downloaded empty response from \(sourceURL.absoluteString)"]
             ))
@@ -139,7 +139,7 @@ func downloadString(from sourceURL: URL) throws -> String {
     let data = try downloadData(from: sourceURL)
     guard let string = String(data: data, encoding: .utf8) else {
         throw NSError(
-            domain: "GWSMenuIconSync",
+            domain: "LazyestWorkIconSync",
             code: 7,
             userInfo: [NSLocalizedDescriptionKey: "Downloaded response is not UTF-8 from \(sourceURL.absoluteString)"]
         )
@@ -200,7 +200,7 @@ func parseLauncherSpriteURL(from html: String) throws -> URL {
         }
     }
     throw NSError(
-        domain: "GWSMenuIconSync",
+        domain: "LazyestWorkIconSync",
         code: 8,
         userInfo: [NSLocalizedDescriptionKey: "Could not find the current Google app launcher sprite URL"]
     )
@@ -217,7 +217,7 @@ func parseLauncherIconOffsets(from html: String) throws -> [Int: Int] {
     }
     if offsets.isEmpty {
         throw NSError(
-            domain: "GWSMenuIconSync",
+            domain: "LazyestWorkIconSync",
             code: 9,
             userInfo: [NSLocalizedDescriptionKey: "Could not find Google app launcher icon offsets"]
         )
@@ -227,11 +227,11 @@ func parseLauncherIconOffsets(from html: String) throws -> [Int: Int] {
 
 func writePNG(_ image: CGImage, to url: URL) throws {
     guard let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil) else {
-        throw NSError(domain: "GWSMenuIconSync", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not create PNG destination for \(url.path)"])
+        throw NSError(domain: "LazyestWorkIconSync", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not create PNG destination for \(url.path)"])
     }
     CGImageDestinationAddImage(destination, image, nil)
     guard CGImageDestinationFinalize(destination) else {
-        throw NSError(domain: "GWSMenuIconSync", code: 2, userInfo: [NSLocalizedDescriptionKey: "Could not write PNG to \(url.path)"])
+        throw NSError(domain: "LazyestWorkIconSync", code: 2, userInfo: [NSLocalizedDescriptionKey: "Could not write PNG to \(url.path)"])
     }
 }
 
@@ -239,7 +239,7 @@ func writeDownloadedPNG(from sourceURL: URL, to destinationURL: URL) throws {
     let data = try downloadData(from: sourceURL)
     guard let source = CGImageSourceCreateWithData(data as CFData, nil),
           let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
-        throw NSError(domain: "GWSMenuIconSync", code: 5, userInfo: [NSLocalizedDescriptionKey: "Could not decode \(sourceURL.absoluteString)"])
+        throw NSError(domain: "LazyestWorkIconSync", code: 5, userInfo: [NSLocalizedDescriptionKey: "Could not decode \(sourceURL.absoluteString)"])
     }
     try writePNG(image, to: destinationURL)
 }
@@ -250,7 +250,7 @@ let offsetsByPID = try parseLauncherIconOffsets(from: launcherHTML)
 let apps = try launcherIcons.map { icon in
     guard let yOffset = offsetsByPID[icon.pid] else {
         throw NSError(
-            domain: "GWSMenuIconSync",
+            domain: "LazyestWorkIconSync",
             code: 10,
             userInfo: [NSLocalizedDescriptionKey: "Could not find Google app launcher offset for \(icon.resourceName)"]
         )
@@ -261,7 +261,7 @@ let apps = try launcherIcons.map { icon in
 let data = try downloadData(from: spriteURL)
 guard let source = CGImageSourceCreateWithData(data as CFData, nil),
       let sprite = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
-    throw NSError(domain: "GWSMenuIconSync", code: 3, userInfo: [NSLocalizedDescriptionKey: "Could not decode Google app sprite"])
+    throw NSError(domain: "LazyestWorkIconSync", code: 3, userInfo: [NSLocalizedDescriptionKey: "Could not decode Google app sprite"])
 }
 
 try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
@@ -269,7 +269,7 @@ try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDir
 for app in apps {
     let crop = CGRect(x: 0, y: abs(app.yOffset) * scale, width: iconSize, height: iconSize)
     guard let icon = sprite.cropping(to: crop) else {
-        throw NSError(domain: "GWSMenuIconSync", code: 4, userInfo: [NSLocalizedDescriptionKey: "Could not crop \(app.resourceName) from sprite"])
+        throw NSError(domain: "LazyestWorkIconSync", code: 4, userInfo: [NSLocalizedDescriptionKey: "Could not crop \(app.resourceName) from sprite"])
     }
     try writePNG(icon, to: outputDirectory.appendingPathComponent("\(app.resourceName).png"))
 }
@@ -290,7 +290,7 @@ if !args.contains(noInstallFlag) {
 
     if process.terminationStatus != 0 {
         throw NSError(
-            domain: "GWSMenuIconSync",
+            domain: "LazyestWorkIconSync",
             code: Int(process.terminationStatus),
             userInfo: [NSLocalizedDescriptionKey: "Install failed with exit code \(process.terminationStatus)"]
         )

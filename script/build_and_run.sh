@@ -2,18 +2,18 @@
 set -euo pipefail
 
 MODE="${1:-run}"
-APP_NAME="GWSMenu"
+APP_NAME="LazyestWork"
 BUNDLE_ID="${GWS_BUNDLE_ID:-io.github.gwsmenu.app}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_BUNDLE="$ROOT_DIR/dist/GWSMenu.app"
-APP_BINARY="$APP_BUNDLE/Contents/MacOS/GWSMenu"
+APP_BUNDLE="$ROOT_DIR/dist/Lazyest Work.app"
+APP_BINARY="$APP_BUNDLE/Contents/MacOS/LazyestWork"
 
 /usr/bin/pkill -x "$APP_NAME" >/dev/null 2>&1 || true
 
 # Preserve this developer machine's existing Google session configuration for
 # local Run actions. Public artifacts always receive publisher config in CI.
-if [[ -z "${GWS_GOOGLE_CLIENT_ID:-}" && -f "/Applications/GWSMenu.app/Contents/Info.plist" ]]; then
-  existing_client_id="$(/usr/libexec/PlistBuddy -c 'Print :GIDClientID' "/Applications/GWSMenu.app/Contents/Info.plist" 2>/dev/null || true)"
+if [[ -z "${GWS_GOOGLE_CLIENT_ID:-}" && -f "/Applications/Lazyest Work.app/Contents/Info.plist" ]]; then
+  existing_client_id="$(/usr/libexec/PlistBuddy -c 'Print :GIDClientID' "/Applications/Lazyest Work.app/Contents/Info.plist" 2>/dev/null || true)"
   if [[ "$existing_client_id" == *.apps.googleusercontent.com && "$existing_client_id" != *YOUR_GOOGLE_CLIENT_ID* ]]; then
     export GWS_GOOGLE_CLIENT_ID="$existing_client_id"
   fi
@@ -48,7 +48,7 @@ case "$MODE" in
       fi
       sleep 0.1
     done
-    echo "GWSMenu did not start." >&2
+    echo "LazyestWork did not start." >&2
     exit 1
     ;;
   *)

@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PACKAGE_DIR="$ROOT_DIR/macos/GWSMenuBar"
-APP_DIR="$ROOT_DIR/dist/GWSMenu.app"
+PACKAGE_DIR="$ROOT_DIR/macos/LazyestWork"
+APP_DIR="$ROOT_DIR/dist/Lazyest Work.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
@@ -17,6 +17,7 @@ MICROSOFT_REDIRECT_SCHEME="msauth.$BUNDLE_ID"
 CODE_SIGN_IDENTITY="${GWS_CODESIGN_IDENTITY:-}"
 TEAM_ID="${GWS_TEAM_ID:-}"
 BUILD_MODE="${GWS_BUILD_MODE:-local}"
+# Keep the established local identity so macOS privacy grants survive the rename.
 LOCAL_CODE_SIGN_IDENTITY="GWS Menu Local Code Signing"
 FALLBACK_LOCAL_CODE_SIGN_IDENTITY="MacBootstrap Local Code Signing"
 USE_AD_HOC_SIGNING=0
@@ -26,7 +27,7 @@ usage() {
   cat <<USAGE
 Usage: scripts/build-macos-app.sh [--distribution]
 
-Builds GWS Menu into dist/GWSMenu.app.
+Builds Lazyest Work into dist/Lazyest Work.app.
 
 Options:
   --distribution  Require publisher Google OAuth configuration before building
@@ -165,7 +166,7 @@ swift build "${SWIFT_BUILD_ARGS[@]}"
 
 rm -rf "$APP_DIR"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
-cp "$PACKAGE_DIR/.build/release/GWSMenu" "$MACOS_DIR/GWSMenu"
+cp "$PACKAGE_DIR/.build/release/LazyestWork" "$MACOS_DIR/LazyestWork"
 if [[ ! -f "$APP_ICON" ]]; then
   "$ROOT_DIR/scripts/generate-app-icon.swift" >/dev/null
 fi
@@ -218,21 +219,21 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
 <plist version="1.0">
 <dict>
   <key>CFBundleExecutable</key>
-  <string>GWSMenu</string>
+  <string>LazyestWork</string>
   <key>CFBundleIdentifier</key>
   <string>$BUNDLE_ID</string>
   <key>CFBundleName</key>
-  <string>GWS Menu</string>
+  <string>Lazyest Work</string>
   <key>CFBundleDisplayName</key>
-  <string>GWS Menu</string>
+  <string>Lazyest Work</string>
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.1.0</string>
+  <string>0.2.0</string>
   <key>CFBundleVersion</key>
-  <string>1</string>
+  <string>2</string>
 $GOOGLE_PLIST_KEYS
 $MICROSOFT_PLIST_KEYS
 $URL_TYPES_PLIST
@@ -245,7 +246,7 @@ $URL_TYPES_PLIST
 PLIST
 
 if [[ -n "$CODE_SIGN_IDENTITY" ]]; then
-  ENTITLEMENTS="$ROOT_DIR/dist/GWSMenu.entitlements"
+  ENTITLEMENTS="$ROOT_DIR/dist/LazyestWork.entitlements"
   KEYCHAIN_GROUP="${GWS_KEYCHAIN_ACCESS_GROUP:-}"
 
   if [[ -z "$KEYCHAIN_GROUP" && -n "$TEAM_ID" ]]; then
