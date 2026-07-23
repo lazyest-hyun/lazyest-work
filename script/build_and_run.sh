@@ -3,7 +3,7 @@ set -euo pipefail
 
 MODE="${1:-run}"
 APP_NAME="LazyestWork"
-BUNDLE_ID="${GWS_BUNDLE_ID:-io.github.gwsmenu.app}"
+BUNDLE_ID="${GWS_BUNDLE_ID:-com.lazyest.work}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_BUNDLE="$ROOT_DIR/dist/Lazyest Work.app"
 APP_BINARY="$APP_BUNDLE/Contents/MacOS/LazyestWork"

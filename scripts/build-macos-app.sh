@@ -8,16 +8,16 @@ CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
 APP_ICON="$PACKAGE_DIR/Assets/AppIcon.icns"
-BUNDLE_ID="${GWS_BUNDLE_ID:-io.github.gwsmenu.app}"
+BUNDLE_ID="${GWS_BUNDLE_ID:-com.lazyest.work}"
 GOOGLE_CLIENT_ID="${GWS_GOOGLE_CLIENT_ID:-}"
 GOOGLE_REVERSED_CLIENT_ID="${GWS_GOOGLE_REVERSED_CLIENT_ID:-}"
 MICROSOFT_CLIENT_ID="${GWS_MICROSOFT_CLIENT_ID:-}"
 MICROSOFT_TENANT_ID="${GWS_MICROSOFT_TENANT_ID:-organizations}"
 MICROSOFT_REDIRECT_SCHEME="msauth.$BUNDLE_ID"
 CODE_SIGN_IDENTITY="${GWS_CODESIGN_IDENTITY:-}"
-TEAM_ID="${GWS_TEAM_ID:-}"
 BUILD_MODE="${GWS_BUILD_MODE:-local}"
-# Keep the established local identity so macOS privacy grants survive the rename.
+# Reuse the established local signing identity when available. Changing the
+# bundle identifier still requires fresh macOS privacy grants after migration.
 LOCAL_CODE_SIGN_IDENTITY="GWS Menu Local Code Signing"
 FALLBACK_LOCAL_CODE_SIGN_IDENTITY="MacBootstrap Local Code Signing"
 USE_AD_HOC_SIGNING=0
@@ -108,10 +108,6 @@ case "$CODE_SIGN_IDENTITY" in
     ;;
 esac
 
-if [[ -z "$TEAM_ID" && "$CODE_SIGN_IDENTITY" =~ \(([A-Z0-9]{10})\)$ ]]; then
-  TEAM_ID="${BASH_REMATCH[1]}"
-fi
-
 GOOGLE_OAUTH_ENABLED=0
 if [[ -n "$GOOGLE_CLIENT_ID" || -n "$GOOGLE_REVERSED_CLIENT_ID" ]]; then
   if [[ ! "$GOOGLE_CLIENT_ID" =~ ^[A-Za-z0-9._-]+\.apps\.googleusercontent\.com$ ]] ||
@@ -146,10 +142,12 @@ if [[ "$BUILD_MODE" == "distribution" ]]; then
       ;;
   esac
 
-  if [[ -z "${GWS_KEYCHAIN_ACCESS_GROUP:-}" && -z "$TEAM_ID" ]]; then
-    echo "Distribution build requires GWS_TEAM_ID or GWS_KEYCHAIN_ACCESS_GROUP for Google Sign-In." >&2
-    exit 78
-  fi
+fi
+
+if [[ -n "${GWS_KEYCHAIN_ACCESS_GROUP:-}" ]]; then
+  echo "GWS_KEYCHAIN_ACCESS_GROUP is not supported: Developer ID direct-distribution builds use the standard app Keychain." >&2
+  echo "Do not inject keychain-access-groups without an entitlement-authorized provisioning workflow." >&2
+  exit 64
 fi
 
 SWIFT_BUILD_ARGS=(
@@ -231,12 +229,14 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.2.0</string>
+  <string>0.3.0</string>
   <key>CFBundleVersion</key>
-  <string>2</string>
+  <string>3</string>
 $GOOGLE_PLIST_KEYS
 $MICROSOFT_PLIST_KEYS
 $URL_TYPES_PLIST
+  <key>NSPrincipalClass</key>
+  <string>NSApplication</string>
   <key>LSMinimumSystemVersion</key>
   <string>14.0</string>
   <key>LSUIElement</key>
@@ -246,35 +246,10 @@ $URL_TYPES_PLIST
 PLIST
 
 if [[ -n "$CODE_SIGN_IDENTITY" ]]; then
-  ENTITLEMENTS="$ROOT_DIR/dist/LazyestWork.entitlements"
-  KEYCHAIN_GROUP="${GWS_KEYCHAIN_ACCESS_GROUP:-}"
-
-  if [[ -z "$KEYCHAIN_GROUP" && -n "$TEAM_ID" ]]; then
-    KEYCHAIN_GROUP="$TEAM_ID.$BUNDLE_ID"
-  fi
-
-  if [[ "$BUILD_MODE" == "distribution" && -z "$KEYCHAIN_GROUP" ]]; then
-    echo "Distribution build requires GWS_TEAM_ID or GWS_KEYCHAIN_ACCESS_GROUP for Google Sign-In." >&2
-    exit 78
-  fi
-
-  if [[ -n "$KEYCHAIN_GROUP" ]]; then
-    cat > "$ENTITLEMENTS" <<ENTITLEMENTS_PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>keychain-access-groups</key>
-  <array>
-    <string>$KEYCHAIN_GROUP</string>
-  </array>
-</dict>
-</plist>
-ENTITLEMENTS_PLIST
-    codesign --force --options runtime "${CODESIGN_TIMESTAMP_ARGS[@]}" --sign "$CODE_SIGN_IDENTITY" --entitlements "$ENTITLEMENTS" "$APP_DIR"
-  else
-    codesign --force --options runtime "${CODESIGN_TIMESTAMP_ARGS[@]}" --sign "$CODE_SIGN_IDENTITY" "$APP_DIR"
-  fi
+  # Google Sign-In persists through the standard app Keychain. A custom
+  # keychain-access-groups entitlement requires an authorized provisioning
+  # workflow and makes this Developer ID app fail at process launch otherwise.
+  codesign --force --options runtime "${CODESIGN_TIMESTAMP_ARGS[@]}" --sign "$CODE_SIGN_IDENTITY" "$APP_DIR"
 else
   if [[ "$BUILD_MODE" == "distribution" ]]; then
     echo "Distribution build requires a Developer ID Application signing identity." >&2

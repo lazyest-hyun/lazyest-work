@@ -33,10 +33,10 @@ final class EventDrivenRefreshScheduler {
     private let onLocalRefresh: LocalRefreshHandler
     private let onGmailRefresh: GmailRefreshHandler
     private let calendarSafetyScheduler = NSBackgroundActivityScheduler(
-        identifier: "io.github.gwsmenu.calendar-safety-sync"
+        identifier: "com.lazyest.work.calendar-safety-sync"
     )
     private let gmailScheduler = NSBackgroundActivityScheduler(
-        identifier: "io.github.gwsmenu.gmail-unread-sync"
+        identifier: "com.lazyest.work.gmail-unread-sync"
     )
 
     private var localTimer: Timer?

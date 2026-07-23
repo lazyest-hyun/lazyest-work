@@ -136,6 +136,23 @@ private final class AsyncProcessExecution: @unchecked Sendable {
         let errorPipe = Pipe()
         process.executableURL = command.executableURL
         process.arguments = command.argumentsPrefix + arguments
+        // Menu-bar apps are launched by LaunchServices, whose PATH commonly
+        // omits Homebrew. The `m365` executable is a Node script with
+        // `#!/usr/bin/env node`, so preserve the inherited PATH while adding
+        // the standard locations that can contain Node and m365.
+        var environment = ProcessInfo.processInfo.environment
+        let requiredPathEntries = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+        let inheritedPathEntries = (environment["PATH"] ?? "")
+            .split(separator: ":")
+            .map(String.init)
+        environment["PATH"] = (inheritedPathEntries + requiredPathEntries)
+            .reduce(into: [String]()) { entries, entry in
+                if !entries.contains(entry) {
+                    entries.append(entry)
+                }
+            }
+            .joined(separator: ":")
+        process.environment = environment
         process.standardOutput = outputPipe
         process.standardError = errorPipe
 
@@ -364,9 +381,14 @@ final class Microsoft365CLIClient: @unchecked Sendable {
                statusText.localizedCaseInsensitiveContains("logged out") {
                 return .signedOut
             }
-            if let status = try? JSONDecoder().decode(Microsoft365CLIStatus.self, from: Data(output.utf8)),
-               let account = status.connectedAs?.nilIfBlank {
-                return .connected(account: account)
+            if let status = try? JSONDecoder().decode(Microsoft365CLIStatus.self, from: Data(output.utf8)) {
+                if let account = status.connectedAs?.nilIfBlank {
+                    return .connected(account: account)
+                }
+                // Recent CLI versions emit a structurally valid status object
+                // with an empty `connectedAs` before the first browser login.
+                // That is a normal signed-out state, not a connection failure.
+                return .signedOut
             }
             return output.localizedCaseInsensitiveContains("logged out") ? .signedOut : .failed
         } catch {
@@ -508,6 +530,19 @@ final class Microsoft365CLIClient: @unchecked Sendable {
 
     private static func installedCommand() -> Microsoft365CLICommand? {
         guard let m365 = findExecutable(named: "m365") else { return nil }
+
+        // Homebrew's m365 command is a `#!/usr/bin/env node` symlink to the
+        // CLI's JavaScript entry point. LaunchServices can strip PATH before
+        // that shebang runs, even when we supply PATH to Process. Resolve the
+        // script and invoke the discovered Node binary directly instead.
+        let resolvedM365 = m365.resolvingSymlinksInPath()
+        if resolvedM365.pathExtension == "js",
+           let node = findExecutable(named: "node") {
+            return Microsoft365CLICommand(
+                executableURL: node,
+                argumentsPrefix: [resolvedM365.path]
+            )
+        }
         return Microsoft365CLICommand(executableURL: m365, argumentsPrefix: [])
     }
 

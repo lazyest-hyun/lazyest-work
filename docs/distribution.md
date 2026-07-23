@@ -13,7 +13,7 @@ Users never edit the app bundle or configure Google Cloud.
 ## Publisher Google configuration
 
 - Enable Google Calendar API and Gmail API in the publisher project.
-- Create an Apple-native OAuth client for the release Bundle ID.
+- Create the Google Apple-native OAuth client for the release bundle identifier, `com.lazyest.work`.
 - Configure the external OAuth consent screen and complete the brand/data-access verification shown by Google Cloud for `calendar.events.readonly`.
 - `gmail.labels` is a [non-sensitive Gmail scope](https://developers.google.com/workspace/gmail/api/auth/scopes), so this design does not require a restricted Gmail scope or its third-party security assessment.
 - Do not create or bundle a Web client secret.
@@ -24,18 +24,16 @@ Build with:
 GWS_BUILD_MODE=distribution \
 GWS_GOOGLE_CLIENT_ID="<publisher-client-id>" \
 GWS_CODESIGN_IDENTITY="Developer ID Application: ..." \
-GWS_TEAM_ID="<apple-team-id>" \
 scripts/build-macos-app.sh --distribution
 ```
 
-The reversed callback scheme is derived from the Client ID. A mismatched scheme, missing publisher ID, non-Developer-ID signature, or missing Keychain access group fails the build.
+The reversed callback scheme is derived from the Client ID. A mismatched scheme, missing publisher ID, or non-Developer-ID signature fails the build. Direct Developer ID builds use the standard app Keychain; they must not inject a custom `keychain-access-groups` entitlement without an entitlement-authorized provisioning workflow.
 
 For the GitHub Release artifact, store notarization credentials once with `notarytool store-credentials`, then package with the saved profile:
 
 ```bash
 GWS_GOOGLE_CLIENT_ID="<publisher-client-id>" \
 GWS_CODESIGN_IDENTITY="Developer ID Application: ... (<apple-team-id>)" \
-GWS_TEAM_ID="<apple-team-id>" \
 GWS_NOTARY_PROFILE="lazyest-work-notary" \
 scripts/package-macos-release.sh
 ```

@@ -322,6 +322,24 @@ private enum PopoverLayout {
 }
 
 @MainActor
+private enum SingleInstanceGuard {
+    static func isPrimaryInstance() -> Bool {
+        guard let bundleIdentifier = Bundle.main.bundleIdentifier else {
+            return true
+        }
+
+        let instances = NSWorkspace.shared.runningApplications
+            .filter { $0.bundleIdentifier == bundleIdentifier }
+            .sorted { $0.processIdentifier < $1.processIdentifier }
+
+        guard let primary = instances.first else {
+            return true
+        }
+        return primary.processIdentifier == ProcessInfo.processInfo.processIdentifier
+    }
+}
+
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let authWindow = AuthWindow()
@@ -364,6 +382,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        guard SingleInstanceGuard.isPrimaryInstance() else {
+            AppLog.lifecycle.notice("Lazyest Work duplicate launch ignored")
+            NSApp.terminate(nil)
+            return
+        }
+
         AppLog.lifecycle.notice("Lazyest Work launched")
         NSApp.setActivationPolicy(.accessory)
         UNUserNotificationCenter.current().delegate = self
@@ -389,6 +413,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             }
             _ = authClient.handle(url: url)
         }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        guard !popover.isShown else { return true }
+        DispatchQueue.main.async { [weak self] in
+            self?.showPopover()
+        }
+        return true
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -1818,15 +1850,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         if popover.isShown {
             popover.performClose(sender)
         } else {
-            updateNow()
-            refreshLaunchAtLoginState()
-            refreshMeetingFocusHelperStatus()
-            refreshMicrosoftConnectionState()
-            refreshUI()
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            popover.contentViewController?.view.window?.makeKey()
-            refreshScheduler.requestRemoteRefresh(.popoverOpened)
+            showPopover()
         }
+    }
+
+    private func showPopover() {
+        guard let button = statusItem.button else { return }
+        updateNow()
+        refreshLaunchAtLoginState()
+        refreshMeetingFocusHelperStatus()
+        refreshMicrosoftConnectionState()
+        refreshUI()
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        popover.contentViewController?.view.window?.makeKey()
+        refreshScheduler.requestRemoteRefresh(.popoverOpened)
     }
 
     private func showStatusMenu(anchor: NSStatusBarButton) {
@@ -2369,7 +2406,7 @@ struct LazyestWorkPopover: View {
     }
 
     private func openGitHub() {
-        guard let url = URL(string: "https://github.com/hyunn515/lazyest-work") else { return }
+        guard let url = URL(string: "https://github.com/lazyest-hyun/lazyest-work") else { return }
         onOpenURL(url)
     }
 
@@ -2379,7 +2416,7 @@ struct LazyestWorkPopover: View {
     }
 
     static func notificationSettingsURL() -> URL? {
-        let bundleID = Bundle.main.bundleIdentifier ?? "io.github.gwsmenu.app"
+        let bundleID = Bundle.main.bundleIdentifier ?? "com.lazyest.work"
         return URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=\(bundleID)")
             ?? URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension")
     }
@@ -5098,28 +5135,30 @@ enum GoogleSignInFactory {
 
 @MainActor
 final class AuthWindow {
-    private let label = NSTextField(labelWithString: "")
-
+    // GoogleSignIn needs a live NSWindow as the ASWebAuthenticationSession
+    // presentation anchor on macOS. Keep that technical anchor invisible: the
+    // user should see the Google authentication sheet, not an extra Lazyest
+    // Work window between the menu-bar action and Google.
     private lazy var window: NSWindow = {
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 180),
-            styleMask: [.titled, .closable],
+        let window = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 2, height: 2),
+            styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
-        window.title = "Lazyest Work"
         window.center()
         window.isReleasedWhenClosed = false
-
-        label.alignment = .center
-        label.frame = NSRect(x: 24, y: 78, width: 372, height: 24)
-        window.contentView?.addSubview(label)
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.alphaValue = 0.01
+        window.hasShadow = false
+        window.ignoresMouseEvents = true
+        window.collectionBehavior = [.transient, .ignoresCycle]
         return window
     }()
 
-    func present(message: String) -> NSWindow {
-        label.stringValue = message
-        window.makeKeyAndOrderFront(nil)
+    func present(message _: String) -> NSWindow {
+        window.orderFrontRegardless()
         NSApp.activate(ignoringOtherApps: true)
         return window
     }

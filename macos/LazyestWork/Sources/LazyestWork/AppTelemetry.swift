@@ -2,7 +2,7 @@ import Foundation
 import OSLog
 
 enum AppLog {
-    private static let subsystem = Bundle.main.bundleIdentifier ?? "io.github.gwsmenu.app"
+    private static let subsystem = Bundle.main.bundleIdentifier ?? "com.lazyest.work"
 
     static let lifecycle = Logger(subsystem: subsystem, category: "Lifecycle")
     static let calendar = Logger(subsystem: subsystem, category: "CalendarSync")

@@ -36,8 +36,7 @@ The publisher owns one Google Apple-native OAuth Client ID for the app Bundle ID
 GWS_BUILD_MODE=distribution \
 GWS_GOOGLE_CLIENT_ID="<publisher-client-id>" \
 GWS_CODESIGN_IDENTITY="Developer ID Application: ..." \
-GWS_TEAM_ID="<apple-team-id>" \
 scripts/build-macos-app.sh --distribution
 ```
 
-Distribution builds fail if the publisher Client ID, callback scheme, Developer ID Application identity, or Keychain access group is unavailable. Runtime bundle mutation and re-signing are intentionally unsupported. `scripts/package-macos-release.sh` performs notarization, ticket stapling, Gatekeeper validation, and final ZIP creation.
+Distribution builds fail if the publisher Client ID, callback scheme, or Developer ID Application identity is unavailable. Google Sign-In uses the standard app Keychain; a custom `keychain-access-groups` entitlement is not included in a Developer ID direct-distribution build. Runtime bundle mutation and re-signing are intentionally unsupported. `scripts/package-macos-release.sh` performs notarization, ticket stapling, Gatekeeper validation, and final ZIP creation.

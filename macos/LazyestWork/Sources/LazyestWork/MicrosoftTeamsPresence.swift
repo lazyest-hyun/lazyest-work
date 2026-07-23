@@ -7,7 +7,7 @@ import Security
 
 struct MicrosoftSetupConfig: Equatable {
     static let defaultTenantID = "organizations"
-    static let defaultBundleID = "io.github.gwsmenu.app"
+    static let defaultBundleID = "com.lazyest.work"
 
     static var redirectScheme: String {
         redirectScheme(for: Bundle.main.bundleIdentifier ?? defaultBundleID)
@@ -215,7 +215,7 @@ struct MicrosoftTokenResponse: Decodable {
 }
 
 final class MicrosoftTokenStore {
-    private let service = "io.github.gwsmenu.microsoft-graph"
+    private let service = "com.lazyest.work.microsoft-graph"
     private let account = "tokens"
 
     func load() throws -> MicrosoftTokenSet? {

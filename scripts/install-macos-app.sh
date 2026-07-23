@@ -32,8 +32,6 @@ Environment variables accepted by scripts/build-macos-app.sh are forwarded:
   GWS_MICROSOFT_CLIENT_ID
   GWS_MICROSOFT_TENANT_ID
   GWS_CODESIGN_IDENTITY
-  GWS_TEAM_ID
-  GWS_KEYCHAIN_ACCESS_GROUP
 USAGE
 }
 
@@ -85,33 +83,38 @@ USER_APP="$HOME/Applications/$APP_NAME"
 LEGACY_SYSTEM_APP="/Applications/$LEGACY_APP_NAME"
 LEGACY_USER_APP="$HOME/Applications/$LEGACY_APP_NAME"
 
-# Preserve a custom local bundle ID so URL callbacks, UserDefaults, and macOS
-# privacy grants keep referring to the same app after a source update. Public
+# Preserve a custom local bundle ID after the Lazyest identity migration. The
+# legacy GWS Menu identifier is deliberately not inherited: it points to the
+# retired OAuth client and would keep the app under the old identity. Public
 # distribution builds always use explicitly supplied publisher configuration.
 if [[ "${GWS_BUILD_MODE:-local}" != "distribution" && -z "${GWS_BUNDLE_ID:-}" ]]; then
   for existing_app in "$DEST_APP" "$SYSTEM_APP" "$USER_APP" "$LEGACY_SYSTEM_APP" "$LEGACY_USER_APP"; do
     existing_plist="$existing_app/Contents/Info.plist"
     [[ -f "$existing_plist" ]] || continue
     existing_bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$existing_plist" 2>/dev/null || true)"
-    if [[ "$existing_bundle_id" =~ ^[A-Za-z0-9.-]+$ ]]; then
+    if [[ "$existing_bundle_id" =~ ^[A-Za-z0-9.-]+$ && "$existing_bundle_id" != "io.github.gwsmenu.app" ]]; then
       export GWS_BUNDLE_ID="$existing_bundle_id"
       break
     fi
   done
 fi
 
-BUNDLE_ID="${GWS_BUNDLE_ID:-io.github.gwsmenu.app}"
+BUNDLE_ID="${GWS_BUNDLE_ID:-com.lazyest.work}"
 HAD_EXISTING_APP=0
 if [[ -d "$DEST_APP" || -d "$SYSTEM_APP" || -d "$USER_APP" || -d "$LEGACY_SYSTEM_APP" || -d "$LEGACY_USER_APP" ]]; then
   HAD_EXISTING_APP=1
 fi
 
-# A local rebuild may reuse the publisher Client ID already embedded in this
-# developer's installed copy. Distribution builds never inherit bundle config.
+# A local rebuild may reuse the publisher Client ID from an already-migrated
+# Lazyest Work copy. Never inherit the retired GWS Menu client: doing so would
+# show the old consent-screen brand after the bundle-ID migration. Distribution
+# builds never inherit bundle configuration.
 if [[ "${GWS_BUILD_MODE:-local}" != "distribution" && -z "${GWS_GOOGLE_CLIENT_ID:-}" ]]; then
   for existing_app in "$DEST_APP" "$SYSTEM_APP" "$USER_APP" "$LEGACY_SYSTEM_APP" "$LEGACY_USER_APP"; do
     existing_plist="$existing_app/Contents/Info.plist"
     [[ -f "$existing_plist" ]] || continue
+    existing_bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$existing_plist" 2>/dev/null || true)"
+    [[ "$existing_bundle_id" != "io.github.gwsmenu.app" ]] || continue
     existing_client_id="$(/usr/libexec/PlistBuddy -c 'Print :GIDClientID' "$existing_plist" 2>/dev/null || true)"
     if [[ "$existing_client_id" == *.apps.googleusercontent.com && "$existing_client_id" != *YOUR_GOOGLE_CLIENT_ID* ]]; then
       export GWS_GOOGLE_CLIENT_ID="$existing_client_id"
@@ -121,7 +124,14 @@ if [[ "${GWS_BUILD_MODE:-local}" != "distribution" && -z "${GWS_GOOGLE_CLIENT_ID
 fi
 
 BUILD_LOG="$(mktemp -t lazyest-work-build.XXXXXX)"
-trap 'rm -f "$BUILD_LOG"' EXIT
+STAGING_DIR=""
+cleanup() {
+  rm -f "$BUILD_LOG"
+  if [[ -n "$STAGING_DIR" ]]; then
+    rm -rf "$STAGING_DIR"
+  fi
+}
+trap cleanup EXIT
 "$ROOT_DIR/scripts/build-macos-app.sh" 2>&1 | tee "$BUILD_LOG"
 BUILT_APP="$(tail -n 1 "$BUILD_LOG")"
 
@@ -131,6 +141,10 @@ if [[ ! -d "$BUILT_APP" ]]; then
 fi
 
 mkdir -p "$INSTALL_DIR"
+STAGING_DIR="$(mktemp -d "$INSTALL_DIR/.lazyest-work-install.XXXXXX")"
+STAGED_APP="$STAGING_DIR/$APP_NAME"
+/usr/bin/ditto "$BUILT_APP" "$STAGED_APP"
+codesign --verify --deep --strict "$STAGED_APP"
 
 if /usr/bin/pgrep -x "LazyestWork" >/dev/null 2>&1; then
   /usr/bin/pkill -x "LazyestWork" || true
@@ -149,7 +163,7 @@ if [[ -d "$DEST_APP" ]]; then
   rm -rf "$DEST_APP"
 fi
 
-/usr/bin/ditto "$BUILT_APP" "$DEST_APP"
+/bin/mv "$STAGED_APP" "$DEST_APP"
 for legacy_app in "$LEGACY_SYSTEM_APP" "$LEGACY_USER_APP"; do
   if [[ -d "$legacy_app" ]]; then
     rm -rf "$legacy_app"
