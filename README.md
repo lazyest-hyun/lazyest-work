@@ -107,7 +107,7 @@ Lazyest Work blocks only Teams elements whose accessibility role and label ident
 
 ## Updating
 
-Public builds update from GitHub Releases. Source builds can update manually:
+Public builds update from the signed and notarized PKG in GitHub Releases. Open the PKG and click **Continue**, then **Install**; the Installer places Lazyest Work in `/Applications`. Source builds can update manually:
 
 ```bash
 git pull
@@ -115,6 +115,20 @@ swift scripts/sync-google-app-icons.swift --accept-google-brand-terms
 ```
 
 The installer closes any running `LazyestWork` process, replaces `/Applications/Lazyest Work.app`, removes an older `~/Applications/Lazyest Work.app` copy when present, and opens the new version.
+
+### Release package
+
+Create the public PKG only on a Mac with the Developer ID Application and Developer ID Installer identities, the publisher-owned Google client ID, and a validated notarytool Keychain profile:
+
+```bash
+GWS_GOOGLE_CLIENT_ID="..." \
+GWS_CODESIGN_IDENTITY="Developer ID Application: ..." \
+GWS_INSTALLER_IDENTITY="Developer ID Installer: ..." \
+GWS_NOTARY_PROFILE="lazyest-notary" \
+scripts/package-macos-release.sh
+```
+
+The command creates `dist/LazyestWork-<version>-macOS.pkg` and its SHA-256 file. It does not create a GitHub tag or Release.
 
 ## Privacy and Permissions
 
