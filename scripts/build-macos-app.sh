@@ -145,7 +145,7 @@ if [[ "$BUILD_MODE" == "distribution" ]]; then
 fi
 
 if [[ -n "${GWS_KEYCHAIN_ACCESS_GROUP:-}" ]]; then
-  echo "GWS_KEYCHAIN_ACCESS_GROUP is not supported: Developer ID direct-distribution builds use the standard app Keychain." >&2
+  echo "GWS_KEYCHAIN_ACCESS_GROUP is not supported: Developer ID direct-distribution builds use the macOS file-based Keychain." >&2
   echo "Do not inject keychain-access-groups without an entitlement-authorized provisioning workflow." >&2
   exit 64
 fi
@@ -154,12 +154,8 @@ SWIFT_BUILD_ARGS=(
   --package-path "$PACKAGE_DIR"
   -c release
   -Xswiftc -gnone
+  -Xswiftc -DGWS_FILE_KEYCHAIN
 )
-if [[ "$BUILD_MODE" == "local" ]]; then
-  # Local certificates have no Apple team prefix for the data-protection
-  # Keychain. Keep the compatibility store out of public release binaries.
-  SWIFT_BUILD_ARGS+=(-Xswiftc -DGWS_LOCAL_FILE_KEYCHAIN)
-fi
 swift build "${SWIFT_BUILD_ARGS[@]}"
 
 rm -rf "$APP_DIR"
@@ -229,9 +225,9 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.3.0</string>
+  <string>0.3.9</string>
   <key>CFBundleVersion</key>
-  <string>3</string>
+  <string>12</string>
 $GOOGLE_PLIST_KEYS
 $MICROSOFT_PLIST_KEYS
 $URL_TYPES_PLIST
@@ -246,9 +242,9 @@ $URL_TYPES_PLIST
 PLIST
 
 if [[ -n "$CODE_SIGN_IDENTITY" ]]; then
-  # Google Sign-In persists through the standard app Keychain. A custom
-  # keychain-access-groups entitlement requires an authorized provisioning
-  # workflow and makes this Developer ID app fail at process launch otherwise.
+  # Google Sign-In uses the macOS file-based Keychain so the direct-distribution
+  # app does not depend on a data-protection access group or provisioning
+  # profile. Do not add keychain-access-groups to this Developer ID build.
   codesign --force --options runtime "${CODESIGN_TIMESTAMP_ARGS[@]}" --sign "$CODE_SIGN_IDENTITY" "$APP_DIR"
 else
   if [[ "$BUILD_MODE" == "distribution" ]]; then

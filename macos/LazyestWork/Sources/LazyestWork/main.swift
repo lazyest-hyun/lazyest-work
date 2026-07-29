@@ -1,11 +1,11 @@
 import AppKit
 import Combine
 import Foundation
-#if GWS_LOCAL_FILE_KEYCHAIN
+#if GWS_FILE_KEYCHAIN
 import GTMAppAuth
 #endif
 import LazyestWorkCore
-#if GWS_LOCAL_FILE_KEYCHAIN
+#if GWS_FILE_KEYCHAIN
 import ObjectiveC
 #endif
 import ServiceManagement
@@ -421,6 +421,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             self?.showPopover()
         }
         return true
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        refreshTeamsCallBlockPermissions()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -1346,7 +1350,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         model.lastError = nil
         model.lastErrorRecovery = nil
 
-        let enabled = teamsCallBlocker.setEnabled(isEnabled, openPermissionsIfMissing: true)
+        if isEnabled, !requestTeamsAccessibilityPermissionIfNeeded() {
+            refreshTeamsCallBlockPermissions()
+            return false
+        }
+
+        let enabled = teamsCallBlocker.setEnabled(isEnabled)
         model.teamsCallBlockEnabled = enabled
         model.teamsCallBlockPermissionPending = teamsCallBlocker.isPendingEnableAfterPermission
         model.teamsCallBlockStatusText = teamsCallBlocker.statusText
@@ -1358,12 +1367,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         model.lastError = nil
         model.lastErrorRecovery = nil
 
-        let enabled = teamsCallBlocker.setControlScrollBlockEnabled(isEnabled, openPermissionsIfMissing: true)
+        if isEnabled, !requestTeamsAccessibilityPermissionIfNeeded() {
+            refreshTeamsCallBlockPermissions()
+            return false
+        }
+
+        let enabled = teamsCallBlocker.setControlScrollBlockEnabled(isEnabled)
         model.teamsControlScrollBlockEnabled = enabled
         model.teamsCallBlockPermissionPending = teamsCallBlocker.isPendingEnableAfterPermission
         model.teamsCallBlockStatusText = teamsCallBlocker.statusText
         refreshUI()
         return enabled
+    }
+
+    private func requestTeamsAccessibilityPermissionIfNeeded() -> Bool {
+        teamsCallBlocker.refreshPermissions()
+        guard !teamsCallBlocker.permissionState.isReady else {
+            return true
+        }
+
+        _ = TeamsCallBlockPermissionState.requestAccessibilityPermission()
+        return false
     }
 
     private func refreshTeamsCallBlockPermissions() {
@@ -1860,7 +1884,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         refreshLaunchAtLoginState()
         refreshMeetingFocusHelperStatus()
         refreshMicrosoftConnectionState()
-        refreshUI()
+        refreshTeamsCallBlockPermissions()
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         popover.contentViewController?.view.window?.makeKey()
         refreshScheduler.requestRemoteRefresh(.popoverOpened)
@@ -3169,13 +3193,13 @@ struct EventRow: View {
                             .foregroundStyle(.secondary)
                         }
                         .buttonStyle(.plain)
-                        .help(event.participantToolTip)
+                        .help(event.participantToolTip(text: text))
                         .popover(
                             isPresented: $isShowingParticipants,
                             attachmentAnchor: .point(.top),
                             arrowEdge: .bottom
                         ) {
-                            ParticipantPopover(event: event)
+                            ParticipantPopover(event: event, language: language)
                         }
                     }
                 }
@@ -3233,11 +3257,14 @@ struct EventIconButton: View {
 
 struct ParticipantPopover: View {
     let event: MeetingEvent
+    let language: AppLanguage
+
+    private var text: AppText { AppText(language: language) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
-                Text("Participants")
+                Text(text.participants)
                     .font(.system(size: 12, weight: .semibold))
                 Spacer()
                 Text(event.participantCompactText ?? "")
@@ -3246,7 +3273,7 @@ struct ParticipantPopover: View {
             }
 
             ScrollView {
-                ParticipantList(participants: event.participants)
+                ParticipantList(participants: event.participants, language: language)
             }
             .frame(maxHeight: 280)
         }
@@ -3257,6 +3284,9 @@ struct ParticipantPopover: View {
 
 struct ParticipantList: View {
     let participants: [MeetingParticipant]
+    let language: AppLanguage
+
+    private var text: AppText { AppText(language: language) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -3270,7 +3300,7 @@ struct ParticipantList: View {
                     Text(participant.label)
                         .font(.system(size: 11, weight: .medium))
                         .lineLimit(1)
-                        .help(participant.helpText)
+                        .help(participant.helpText(text: text))
 
                     Spacer(minLength: 6)
                 }
@@ -3670,7 +3700,8 @@ struct AppSettingsView: View {
                         )
                         MicrosoftTeamsControlScrollBlockSettingsCard(
                             language: currentLanguage,
-                            isEnabled: teamsControlScrollBlockBinding
+                            isEnabled: teamsControlScrollBlockBinding,
+                            statusText: teamsCallBlockStatusText
                         )
                         MicrosoftTeamsSettingsCard(
                             language: currentLanguage,
@@ -4845,7 +4876,7 @@ enum ConnectionState: Equatable {
     case loading
     case missingBundleConfig
     case signedOut
-    case connected(email: String?)
+    case connected(name: String?, email: String?)
 
     var isConnected: Bool {
         if case .connected = self {
@@ -4862,9 +4893,23 @@ enum ConnectionState: Equatable {
             return "Google: Unavailable"
         case .signedOut:
             return "Google: Not connected"
-        case .connected(let email):
-            return "Google: \(email ?? "Connected")"
+        case .connected:
+            return "Google: \(accountDisplayLabel ?? "Connected")"
         }
+    }
+
+    var accountDisplayLabel: String? {
+        guard case .connected(let name, let email) = self else {
+            return nil
+        }
+        let cleanName = name?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        let cleanEmail = email?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+
+        if let cleanName, let cleanEmail,
+           cleanName.caseInsensitiveCompare(cleanEmail) != .orderedSame {
+            return "\(cleanName) (\(cleanEmail))"
+        }
+        return cleanName ?? cleanEmail
     }
 
     var accountLine: String {
@@ -4875,8 +4920,8 @@ enum ConnectionState: Equatable {
             return "Unavailable in this build"
         case .signedOut:
             return "Not connected"
-        case .connected(let email):
-            return email ?? "Connected"
+        case .connected:
+            return accountDisplayLabel ?? "Connected"
         }
     }
 }
@@ -4922,7 +4967,10 @@ final class GoogleSignInAuthClient {
         guard let user = signIn.currentUser else {
             return .signedOut
         }
-        return .connected(email: user.profile?.email)
+        return .connected(
+            name: user.profile?.name,
+            email: user.profile?.email
+        )
     }
 
     func configure(clientID: String) {
@@ -4956,6 +5004,7 @@ final class GoogleSignInAuthClient {
         guard GoogleOAuthConfiguration.current.isComplete else {
             throw AppError.missingBundleConfig
         }
+        GoogleSignInFactory.removeUnreadableFileKeychainSessionBeforeInteractiveSignIn()
         let window = authWindow.present(
             message: includeGmailLabels
                 ? "Connect Calendar and Gmail unread count."
@@ -5094,8 +5143,10 @@ final class GoogleSignInAuthClient {
 }
 
 enum GoogleSignInFactory {
+    private static let authItemName = "auth"
+
     static var supportsPublicIncrementalScopes: Bool {
-        #if GWS_LOCAL_FILE_KEYCHAIN
+        #if GWS_FILE_KEYCHAIN
         false
         #else
         true
@@ -5104,18 +5155,42 @@ enum GoogleSignInFactory {
 
     @MainActor
     static func makeSignIn() -> GIDSignIn {
-        #if GWS_LOCAL_FILE_KEYCHAIN
-        if let local = makeMacFileKeychainSignIn() {
-            return local
+        #if GWS_FILE_KEYCHAIN
+        if let fileKeychainSignIn = makeMacFileKeychainSignIn() {
+            return fileKeychainSignIn
         }
         #endif
         return GIDSignIn.sharedInstance
     }
 
-    #if GWS_LOCAL_FILE_KEYCHAIN
+    static func removeUnreadableFileKeychainSessionBeforeInteractiveSignIn() {
+        #if GWS_FILE_KEYCHAIN
+        let store = makeFileKeychainStore()
+        do {
+            _ = try store.retrieveAuthSession()
+        } catch {
+            do {
+                try store.removeAuthSession()
+                AppLog.lifecycle.notice("Removed an unreadable legacy Google Keychain session before reconnecting")
+            } catch {
+                // A missing or locked item needs no destructive fallback here.
+                // Google Sign-In will report the actionable error to the user.
+            }
+        }
+        #endif
+    }
+
+    #if GWS_FILE_KEYCHAIN
+    private static func makeFileKeychainStore() -> KeychainStore {
+        KeychainStore(
+            itemName: authItemName,
+            keychainAttributes: [KeychainAttribute.useFileBasedKeychain]
+        )
+    }
+
     @MainActor
     private static func makeMacFileKeychainSignIn() -> GIDSignIn? {
-        let store = KeychainStore(itemName: "auth", keychainAttributes: [KeychainAttribute.useFileBasedKeychain])
+        let store = makeFileKeychainStore()
         guard let migrationClass = objc_getClass("GIDAuthStateMigration") as? AnyObject,
               let migrationAllocated = migrationClass.perform(NSSelectorFromString("alloc"))?.takeRetainedValue(),
               let migration = migrationAllocated
@@ -5288,12 +5363,17 @@ final class GoogleCalendarService {
         ]
 
         let response: GoogleEventsResponse = try await get(components.url!, token: token)
-        return (response.items ?? [])
-            .filter(\.belongsOnMyCalendar)
-            .compactMap { MeetingEvent(event: $0, calendarName: nil) }
+        let events = (response.items ?? []).filter(\.belongsOnMyCalendar)
+        return events.compactMap {
+            MeetingEvent(event: $0, calendarName: nil)
+        }
     }
 
-    private func get<T: Decodable>(_ url: URL, token: String) async throws -> T {
+    private func get<T: Decodable>(
+        _ url: URL,
+        token: String,
+        service: GoogleAPIService = .calendar
+    ) async throws -> T {
         var request = URLRequest(url: url)
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -5304,13 +5384,14 @@ final class GoogleCalendarService {
         }
         guard (200..<300).contains(http.statusCode) else {
             throw GoogleAPIError.decode(
-                service: .calendar,
+                service: service,
                 statusCode: http.statusCode,
                 data: data
             )
         }
         return try JSONDecoder().decode(T.self, from: data)
     }
+
 }
 
 @MainActor
@@ -5386,7 +5467,10 @@ struct GoogleEventPerson: Decodable {
     }
 
     var label: String? {
-        CalendarPersonLabel.displayName(displayName, email: email, isSelf: selfPerson == true)
+        CalendarPersonLabel.displayName(
+            displayName,
+            email: email
+        )
     }
 }
 
@@ -5425,27 +5509,9 @@ struct MeetingParticipant: Identifiable, Equatable {
         }
     }
 
-    var responseText: String? {
-        switch responseStatus {
-        case "accepted":
-            return "Accepted"
-        case "tentative":
-            return "Tentative"
-        case "declined":
-            return "Declined"
-        case "needsAction":
-            return "No response"
-        default:
-            return nil
-        }
-    }
-
-    var trailingText: String? {
-        role?.nilIfBlank
-    }
-
-    var helpText: String {
-        [label, email, role?.nilIfBlank, responseText]
+    func helpText(text: AppText) -> String {
+        let localizedRole = role == "Host" ? text.host : role?.nilIfBlank
+        return [label, email, localizedRole, text.participantResponse(responseStatus)]
             .compactMap { $0?.nilIfBlank }
             .joined(separator: "\n")
     }
@@ -5478,16 +5544,18 @@ struct GoogleEventAttendee: Decodable {
         guard resource != true else {
             return nil
         }
-        return CalendarPersonLabel.displayName(displayName, email: email, isSelf: selfAttendee == true)
+        return CalendarPersonLabel.displayName(
+            displayName,
+            email: email
+        )
     }
 }
 
 enum CalendarPersonLabel {
-    static func displayName(_ displayName: String?, email: String?, isSelf: Bool) -> String? {
-        if isSelf {
-            return "You"
-        }
-
+    static func displayName(
+        _ displayName: String?,
+        email: String?
+    ) -> String? {
         if let name = displayName?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
            !name.contains("@") {
             return name
@@ -5497,7 +5565,7 @@ enum CalendarPersonLabel {
             return displayName?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
         }
 
-        return email.split(separator: "@").first.map(String.init) ?? email
+        return email
     }
 }
 
@@ -5563,7 +5631,8 @@ struct MeetingEvent: Equatable {
         self.hangoutLink = event.hangoutLink.flatMap(URL.init(string:))
         self.calendarName = calendarName
         self.isAllDay = allDay
-        self.organizerName = event.organizer?.label ?? event.creator?.label
+        self.organizerName = event.organizer?.label
+            ?? event.creator?.label
         self.guestCount = MeetingEvent.guestCount(from: event)
         self.participants = MeetingEvent.participants(from: event)
         self.selfResponseStatus = MeetingEvent.selfResponseStatus(from: event)
@@ -5683,12 +5752,12 @@ struct MeetingEvent: Equatable {
             .nilIfEmpty
     }
 
-    var participantToolTip: String {
+    func participantToolTip(text: AppText) -> String {
         let host = organizerName?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .nilIfEmpty
-            .map { "Host: \($0)" }
-        let guests = guestCount == 1 ? "1 guest" : "\(guestCount) guests"
+            .map { "\(text.host): \($0)" }
+        let guests = text.participantCount(guestCount)
         return [host, guests]
             .compactMap { $0 }
             .joined(separator: "\n")

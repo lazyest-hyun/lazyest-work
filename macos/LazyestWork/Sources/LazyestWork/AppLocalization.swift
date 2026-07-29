@@ -96,8 +96,32 @@ struct AppText {
     var inboxUnreadBadgeSubtitle: String { s("Unread count; rechecks briefly after Gmail opens.", "안 읽은 개수 · Gmail을 연 뒤 잠시 재확인") }
     var account: String { s("Account", "계정") }
     var googleAccount: String { s("Google account", "Google 계정") }
+    var participants: String { s("Participants", "참여자") }
+    var host: String { s("Host", "주최자") }
     var signOut: String { s("Sign Out", "로그아웃") }
     var cancel: String { s("Cancel", "취소") }
+
+    func participantCount(_ count: Int) -> String {
+        if language == .korean {
+            return "참여자 \(count)명"
+        }
+        return count == 1 ? "1 participant" : "\(count) participants"
+    }
+
+    func participantResponse(_ responseStatus: String?) -> String? {
+        switch responseStatus {
+        case "accepted":
+            return s("Accepted", "수락")
+        case "tentative":
+            return s("Tentative", "미정")
+        case "declined":
+            return s("Declined", "거절")
+        case "needsAction":
+            return s("No response", "응답 없음")
+        default:
+            return nil
+        }
+    }
 
     var teamsCLIUnavailable: String { s("Microsoft 365 CLI is not available.", "Microsoft 365 CLI를 사용할 수 없습니다.") }
     var teamsConnectOnce: String { s("Connect once with Microsoft CLI.", "Microsoft CLI로 한 번 연결하세요.") }
@@ -128,7 +152,7 @@ struct AppText {
         case .loading: return s("Checking calendar", "캘린더 확인 중")
         case .missingBundleConfig: return s("Setup needed", "설정 필요")
         case .signedOut: return s("Not signed in", "로그인 안 됨")
-        case .connected(let email): return email ?? s("Connected", "연결됨")
+        case .connected: return state.accountDisplayLabel ?? s("Connected", "연결됨")
         }
     }
 
@@ -149,15 +173,27 @@ struct AppText {
         case "Off. Turn on Teams call confirmation.":
             return "꺼짐"
         case "Off. Accessibility permission is needed before Teams calls can be blocked.":
-            return "꺼짐. Teams 통화를 차단하려면 손쉬운 사용 권한이 필요합니다."
+            return "꺼짐. 손쉬운 사용에서 Lazyest Work를 추가하세요. 이미 있으면 제거 후 다시 추가하세요."
         case "On. Teams calls require confirmation.":
             return "켜짐"
         case "Off. Accessibility permission is not detected for Lazyest Work.":
-            return "꺼짐. Lazyest Work의 손쉬운 사용 권한이 감지되지 않았습니다."
+            return "꺼짐. 손쉬운 사용에서 Lazyest Work를 추가하세요. 이미 있으면 제거 후 다시 추가하세요."
+        case "Off. Input Monitoring permission is needed before Teams input can be blocked.":
+            return "꺼짐. Teams 입력을 차단하려면 입력 모니터링 권한이 필요합니다."
+        case "Off. Accessibility and Input Monitoring permissions are needed.":
+            return "꺼짐. 손쉬운 사용과 입력 모니터링 권한이 필요합니다."
+        case "Off. Input Monitoring permission is not detected for Lazyest Work.":
+            return "꺼짐. Lazyest Work의 입력 모니터링 권한이 감지되지 않았습니다."
+        case "Off. Accessibility and Input Monitoring permissions are not detected for Lazyest Work.":
+            return "꺼짐. Lazyest Work의 손쉬운 사용과 입력 모니터링 권한이 감지되지 않았습니다."
         case "Off. macOS did not allow event monitoring. Quit and reopen Lazyest Work.":
             return "꺼짐. macOS가 이벤트 모니터링을 허용하지 않았습니다. Lazyest Work를 다시 여세요."
         case "Waiting for Accessibility permission. Enable Lazyest Work in System Settings.":
             return "손쉬운 사용 권한을 기다리는 중입니다. 시스템 설정에서 Lazyest Work를 켜세요."
+        case "Waiting for Input Monitoring permission. Enable Lazyest Work in System Settings.":
+            return "입력 모니터링 권한을 기다리는 중입니다. 시스템 설정에서 Lazyest Work를 켜세요."
+        case "Waiting for Accessibility and Input Monitoring permissions in System Settings.":
+            return "시스템 설정에서 손쉬운 사용과 입력 모니터링 권한을 기다리는 중입니다."
         case "Waiting for macOS event monitoring. Lazyest Work will turn on Teams call block automatically.":
             return "macOS 이벤트 모니터링을 기다리는 중입니다. 준비되면 Teams 통화 차단을 자동으로 켭니다."
         case "Blocked a Teams call click.":

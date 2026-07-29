@@ -114,6 +114,41 @@ struct LazyestWorkCoreBehaviorTest {
         expectEqual(FocusStatusParser.parse("off"), false, "English off status means DND is off")
         expectEqual(FocusStatusParser.parse("enabled"), true, "English enabled status means DND is on")
 
+        expectEqual(
+            TeamsInputProtectionPolicy.permissionState(
+                accessibilityGranted: true
+            ),
+            .ready,
+            "Teams input protection is ready with Accessibility permission"
+        )
+        expectEqual(
+            TeamsInputProtectionPolicy.permissionState(
+                accessibilityGranted: false
+            ),
+            .missingAccessibility,
+            "Teams input protection requires Accessibility permission"
+        )
+        expectEqual(
+            TeamsInputProtectionPolicy.shouldBlockControlScroll(
+                isEnabled: true,
+                controlKeyIsDown: true,
+                isTeamsFrontmost: true,
+                isInsideTeamsWindow: true
+            ),
+            true,
+            "Control-scroll is blocked inside the frontmost Teams window"
+        )
+        expectEqual(
+            TeamsInputProtectionPolicy.shouldBlockControlScroll(
+                isEnabled: true,
+                controlKeyIsDown: true,
+                isTeamsFrontmost: false,
+                isInsideTeamsWindow: true
+            ),
+            false,
+            "Control-scroll stays transparent outside frontmost Teams"
+        )
+
         let remaining = date("2026-06-11T09:04:15Z")
         let shortPresence = TeamsPresencePolicy.preferredPresenceRequest(
             until: date("2026-06-11T09:06:00Z"),
@@ -204,6 +239,7 @@ SWIFT
 swiftc \
   "$ROOT/macos/LazyestWork/Sources/LazyestWorkCore/LazyestWorkCore.swift" \
   "$ROOT/macos/LazyestWork/Sources/LazyestWorkCore/GmailUnreadReconciliationPlan.swift" \
+  "$ROOT/macos/LazyestWork/Sources/LazyestWorkCore/TeamsInputProtectionPolicy.swift" \
   "$TMPDIR/TestLazyestWorkCore.swift" \
   -o "$TMPDIR/lazyest-work-core-test"
 "$TMPDIR/lazyest-work-core-test"

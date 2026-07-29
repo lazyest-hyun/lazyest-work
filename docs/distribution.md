@@ -27,7 +27,7 @@ GWS_CODESIGN_IDENTITY="Developer ID Application: ..." \
 scripts/build-macos-app.sh --distribution
 ```
 
-The reversed callback scheme is derived from the Client ID. A mismatched scheme, missing publisher ID, or non-Developer-ID signature fails the build. Direct Developer ID builds use the standard app Keychain; they must not inject a custom `keychain-access-groups` entitlement without an entitlement-authorized provisioning workflow.
+The reversed callback scheme is derived from the Client ID. A mismatched scheme, missing publisher ID, or non-Developer-ID signature fails the build. Direct Developer ID builds use the macOS file-based Keychain item named `auth`, so signed local and distribution builds restore the same Google session without a data-protection access group. They must not inject a custom `keychain-access-groups` entitlement.
 
 For the GitHub Release artifact, store notarization credentials once with `notarytool store-credentials`, then package with the saved profile:
 
@@ -40,7 +40,7 @@ scripts/package-macos-release.sh
 
 The packaging script signs with the hardened runtime, submits the ZIP to Apple, staples the accepted ticket to the app, validates it with Gatekeeper, and then recreates the final release ZIP. `Apple Distribution` certificates are intentionally rejected because they are for App Store workflows, not direct GitHub distribution.
 
-Local development builds may reuse the publisher ID embedded in an existing `/Applications/Lazyest Work.app`. This compatibility behavior is never used for a distribution artifact.
+Local development builds may reuse the publisher ID embedded in an existing `/Applications/Lazyest Work.app`. Distribution artifacts still require an explicit publisher ID at packaging time.
 
 ## Microsoft Graph
 

@@ -7,10 +7,13 @@
 - Keep the repository private unless the user explicitly approves public visibility.
 - A source push is not authorization to create a tag, GitHub Release, download, or store submission.
 
-When the user explicitly asks to install Lazyest Work, run this exact command without an audit or dry-run first:
+## Distribution install and runtime verification
 
-```sh
-(workdir="$(mktemp -d)" && trap 'rm -rf "$workdir"' EXIT && git clone --depth 1 --quiet https://github.com/lazyest-hyun/lazyest-work.git "$workdir" && "$workdir/scripts/install-macos-app.sh")
-```
+- Do not launch or use `dist/Lazyest Work.app` for local UI, permission, Keychain, Teams, or runtime testing. Files under `dist/` are packaging artifacts only.
+- Runtime verification must use `/Applications/Lazyest Work.app` installed from a Developer ID-signed and Apple-notarized PKG.
+- For current-source verification, build and notarize the app and PKG with `scripts/package-macos-release.sh`, install that PKG into `/Applications`, then launch and test `/Applications/Lazyest Work.app`.
+- For a published version, download the PKG from the `lazyest-hyun/lazyest-work` GitHub Release with `gh-lazyest`, verify its checksum, Developer ID Installer signature, and notarization before installation.
+- Never treat a source build, a signed app in `dist/`, or successful notarization as runtime verification.
+- Do not connect accounts, accept permissions, or change app settings unless the user asks.
 
-This builds current source locally, installs `/Applications/Lazyest Work.app`, launches it, and deletes the temporary checkout. Do not connect accounts, accept permissions, or change app settings unless the user asks.
+The user must enter administrator credentials directly in the macOS Installer UI when installation requires them.

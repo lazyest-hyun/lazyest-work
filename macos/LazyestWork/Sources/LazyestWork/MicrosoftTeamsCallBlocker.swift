@@ -2,6 +2,7 @@
 @preconcurrency import ApplicationServices
 import Combine
 import Foundation
+import LazyestWorkCore
 
 @MainActor
 private final class TeamsCallConfirmationController: NSObject {
@@ -151,9 +152,9 @@ enum TeamsCallBlockSettings {
     }
 }
 
-enum TeamsCallBlockPermissionState: Equatable {
-    case ready
-    case missingAccessibility
+typealias TeamsCallBlockPermissionState = TeamsInputProtectionPermissionState
+
+extension TeamsInputProtectionPermissionState {
 
     var isReady: Bool {
         self == .ready
@@ -194,7 +195,14 @@ enum TeamsCallBlockPermissionState: Equatable {
         let accessibilityGranted = AXIsProcessTrustedWithOptions(
             [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false] as CFDictionary
         )
-        return accessibilityGranted ? .ready : .missingAccessibility
+        return TeamsInputProtectionPolicy.permissionState(accessibilityGranted: accessibilityGranted)
+    }
+
+    static func requestAccessibilityPermission() -> TeamsCallBlockPermissionState {
+        let accessibilityGranted = AXIsProcessTrustedWithOptions(
+            [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        )
+        return TeamsInputProtectionPolicy.permissionState(accessibilityGranted: accessibilityGranted)
     }
 }
 
@@ -275,8 +283,6 @@ final class MicrosoftTeamsCallBlocker: ObservableObject, @unchecked Sendable {
     private var permissionRetryTimer: Timer?
     private var permissionRetryCount = 0
     private var confirmationTask: Task<Void, Never>?
-    private var shouldContinuePermissionRequests = false
-    private var didRequestAccessibility = false
     private var lastTeamsAccessibilityWarmUp = Date.distantPast
 
     deinit {
@@ -332,15 +338,15 @@ final class MicrosoftTeamsCallBlocker: ObservableObject, @unchecked Sendable {
     }
 
     @discardableResult
-    func setEnabled(_ shouldEnable: Bool, openPermissionsIfMissing: Bool = false) -> Bool {
+    func setEnabled(_ shouldEnable: Bool) -> Bool {
         isEnabled = shouldEnable
         TeamsCallBlockSettings.saveEnabled(shouldEnable)
         guard shouldEnable else {
-            _ = applyFeatureChange(openPermissionsIfMissing: false)
+            _ = applyFeatureChange()
             return false
         }
 
-        let applied = applyFeatureChange(openPermissionsIfMissing: openPermissionsIfMissing)
+        let applied = applyFeatureChange()
         if !applied {
             // A switch must represent active protection, not merely an intent
             // that macOS cannot honor until Accessibility is granted.
@@ -352,15 +358,15 @@ final class MicrosoftTeamsCallBlocker: ObservableObject, @unchecked Sendable {
     }
 
     @discardableResult
-    func setControlScrollBlockEnabled(_ shouldEnable: Bool, openPermissionsIfMissing: Bool = false) -> Bool {
+    func setControlScrollBlockEnabled(_ shouldEnable: Bool) -> Bool {
         isControlScrollBlockEnabled = shouldEnable
         TeamsCallBlockSettings.saveControlScrollEnabled(shouldEnable)
         guard shouldEnable else {
-            _ = applyFeatureChange(openPermissionsIfMissing: false)
+            _ = applyFeatureChange()
             return false
         }
 
-        let applied = applyFeatureChange(openPermissionsIfMissing: openPermissionsIfMissing)
+        let applied = applyFeatureChange()
         if !applied {
             // Do not leave the settings UI claiming that Control-scroll is
             // blocked when the event tap could not be installed.
@@ -371,7 +377,7 @@ final class MicrosoftTeamsCallBlocker: ObservableObject, @unchecked Sendable {
         return applied
     }
 
-    private func applyFeatureChange(openPermissionsIfMissing: Bool) -> Bool {
+    private func applyFeatureChange() -> Bool {
         guard hasEnabledProtection else {
             clearPendingEnableAfterPermission()
             stop()
@@ -383,20 +389,17 @@ final class MicrosoftTeamsCallBlocker: ObservableObject, @unchecked Sendable {
             finishEnableSuccess()
             return true
         }
-        if openPermissionsIfMissing, permissionState == .missingAccessibility {
-            requestMissingPermission(for: permissionState)
-        }
         return false
     }
 
-    private func disableUnavailableProtection() {
+    private func disableUnavailableProtection(statusText: String? = nil) {
         isEnabled = false
         isControlScrollBlockEnabled = false
         TeamsCallBlockSettings.saveEnabled(false)
         TeamsCallBlockSettings.saveControlScrollEnabled(false)
         clearPendingEnableAfterPermission()
         stop()
-        setStatus(permissionState.statusText)
+        setStatus(statusText ?? permissionState.statusText)
     }
 
     func refreshPermissions() {
@@ -432,8 +435,6 @@ final class MicrosoftTeamsCallBlocker: ObservableObject, @unchecked Sendable {
     }
 
     private func finishEnableSuccess() {
-        shouldContinuePermissionRequests = false
-        didRequestAccessibility = false
         isPendingEnableAfterPermission = false
         TeamsCallBlockSettings.savePendingEnableAfterPermission(false)
         permissionRetryTimer?.invalidate()
@@ -442,19 +443,7 @@ final class MicrosoftTeamsCallBlocker: ObservableObject, @unchecked Sendable {
         setStatus(callProtectionStatusText)
     }
 
-    private func beginPendingEnableAfterPermission(openPermissionsIfMissing: Bool) {
-        isPendingEnableAfterPermission = true
-        TeamsCallBlockSettings.savePendingEnableAfterPermission(true)
-        setStatus(permissionState.pendingEnableStatusText)
-        startPermissionRetryTimer()
-
-        shouldContinuePermissionRequests = openPermissionsIfMissing
-        requestCurrentPermissionIfNeeded()
-    }
-
     private func clearPendingEnableAfterPermission() {
-        shouldContinuePermissionRequests = false
-        didRequestAccessibility = false
         isPendingEnableAfterPermission = false
         TeamsCallBlockSettings.savePendingEnableAfterPermission(false)
         permissionRetryTimer?.invalidate()
@@ -484,27 +473,13 @@ final class MicrosoftTeamsCallBlocker: ObservableObject, @unchecked Sendable {
             return
         }
 
-        let previousState = permissionState
         permissionState = TeamsCallBlockPermissionState.current()
-        if permissionState != previousState {
-            requestCurrentPermissionIfNeeded()
-        }
         if startIfPossible() {
             finishEnableSuccess()
             return
         }
 
         setStatus(permissionState.pendingEnableStatusText)
-    }
-
-    private func requestCurrentPermissionIfNeeded() {
-        guard shouldContinuePermissionRequests,
-              permissionState == .missingAccessibility,
-              !didRequestAccessibility else {
-            return
-        }
-        didRequestAccessibility = true
-        requestMissingPermission(for: permissionState)
     }
 
     private func startIfPossible() -> Bool {
@@ -529,16 +504,6 @@ final class MicrosoftTeamsCallBlocker: ObservableObject, @unchecked Sendable {
             return false
         }
         return true
-    }
-
-    private func requestMissingPermission(for state: TeamsCallBlockPermissionState) {
-        switch state {
-        case .missingAccessibility:
-            let promptOption = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
-            _ = AXIsProcessTrustedWithOptions([promptOption: true] as CFDictionary)
-        case .ready:
-            return
-        }
     }
 
     private func startEventTap() -> Bool {
@@ -668,7 +633,8 @@ final class MicrosoftTeamsCallBlocker: ObservableObject, @unchecked Sendable {
         refreshTeamsWindows()
         installTeamsAccessibilityObservers()
         guard ensureEventTapForActiveApplication() else {
-            setStatus(permissionState.eventMonitoringUnavailableText)
+            let unavailableStatus = permissionState.eventMonitoringUnavailableText
+            disableUnavailableProtection(statusText: unavailableStatus)
             return
         }
         setEventTapEnabled(true)
@@ -976,9 +942,14 @@ final class MicrosoftTeamsCallBlocker: ObservableObject, @unchecked Sendable {
     }
 
     private func handleScrollWheel(_ event: CGEvent) -> Unmanaged<CGEvent>? {
-        guard isControlScrollBlockEnabled,
-              controlKeyIsDown(for: event),
-              isFrontmostTeamsWindow(at: event.location) else {
+        let isTeamsFrontmost = NSWorkspace.shared.frontmostApplication.map(isTeamsApplication) ?? false
+        let isInsideTeamsWindow = teamsWindowFrames.contains(where: { $0.contains(event.location) })
+        guard TeamsInputProtectionPolicy.shouldBlockControlScroll(
+            isEnabled: isControlScrollBlockEnabled,
+            controlKeyIsDown: controlKeyIsDown(for: event),
+            isTeamsFrontmost: isTeamsActive && isTeamsFrontmost,
+            isInsideTeamsWindow: isInsideTeamsWindow
+        ) else {
             return Unmanaged.passUnretained(event)
         }
 
@@ -988,19 +959,6 @@ final class MicrosoftTeamsCallBlocker: ObservableObject, @unchecked Sendable {
 
     private func controlKeyIsDown(for event: CGEvent) -> Bool {
         event.flags.contains(.maskControl)
-    }
-
-    private func isFrontmostTeamsWindow(at location: CGPoint) -> Bool {
-        guard isTeamsActive,
-              let frontmostApplication = NSWorkspace.shared.frontmostApplication,
-              isTeamsApplication(frontmostApplication) else {
-            return false
-        }
-
-        // A missing window snapshot is never sufficient reason to suppress an
-        // input event. At worst, a newly opened Teams window gets one normal
-        // Control-scroll; other apps are never affected.
-        return teamsWindowFrames.contains(where: { $0.contains(location) })
     }
 
     private func isTeamsElement(_ element: AXUIElement) -> Bool {

@@ -192,15 +192,18 @@ struct MicrosoftTeamsCallProtectionSettingsCard: View {
 struct MicrosoftTeamsControlScrollBlockSettingsCard: View {
     let language: AppLanguage
     @Binding var isEnabled: Bool
+    let statusText: String
     private var text: AppText { AppText(language: language) }
 
     var body: some View {
         MicrosoftTeamsProtectionToggleRow(
             title: text.teamsControlScrollBlock,
-            subtitle: text.s(
-                "Only blocks Control-scroll in the frontmost Teams window.",
-                "Teams가 전면일 때만 Control+스크롤을 차단합니다."
-            ),
+            subtitle: isEnabled
+                ? text.s(
+                    "On. Only blocks Control-scroll in the frontmost Teams window.",
+                    "켜짐. Teams가 전면일 때만 Control+스크롤을 차단합니다."
+                )
+                : text.localizedCallBlockStatus(statusText),
             symbol: "magnifyingglass.circle",
             isOn: $isEnabled,
             help: text.teamsControlScrollBlock
