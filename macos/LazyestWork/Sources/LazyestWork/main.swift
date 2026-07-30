@@ -2251,6 +2251,34 @@ struct LazyestWorkPopover: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
+                    if !model.connectionState.isConnected {
+                        VStack(alignment: .leading, spacing: 14) {
+                            if let lastError = presentedLastError ?? presentedGmailError {
+                                let recovery = presentedLastError == nil
+                                    ? model.gmailErrorRecovery
+                                    : model.lastErrorRecovery
+                                ErrorBanner(
+                                    message: lastError,
+                                    actionTitle: recovery?.buttonTitle,
+                                    action: recovery.map { recovery in
+                                        { recoverFromError(recovery) }
+                                    }
+                                )
+                            }
+
+                            PrimaryCalendarCard(
+                                connectionState: model.connectionState,
+                                language: model.language,
+                                isBusy: model.isBusy,
+                                includesGmail: model.mailBadgeEnabled,
+                                onSignIn: onSignIn
+                            )
+                        }
+                        .padding(16)
+
+                        MenuDivider()
+                    }
+
                     WorkspaceGrid(
                         apps: model.workspaceApps.filter(\.isEnabled),
                         language: model.language,
@@ -2267,55 +2295,56 @@ struct LazyestWorkPopover: View {
                     MenuDivider()
 
                     VStack(alignment: .leading, spacing: 14) {
-                    if let lastError = presentedLastError ?? presentedGmailError {
-                        let recovery = presentedLastError == nil
-                            ? model.gmailErrorRecovery
-                            : model.lastErrorRecovery
-                        ErrorBanner(
-                            message: lastError,
-                            actionTitle: recovery?.buttonTitle,
-                            action: recovery.map { recovery in
-                                { recoverFromError(recovery) }
-                            }
-                        )
-                    }
+                        if model.connectionState.isConnected,
+                           let lastError = presentedLastError ?? presentedGmailError {
+                            let recovery = presentedLastError == nil
+                                ? model.gmailErrorRecovery
+                                : model.lastErrorRecovery
+                            ErrorBanner(
+                                message: lastError,
+                                actionTitle: recovery?.buttonTitle,
+                                action: recovery.map { recovery in
+                                    { recoverFromError(recovery) }
+                                }
+                            )
+                        }
 
-                    if !model.connectionState.isConnected || model.events.isEmpty {
-                        PrimaryCalendarCard(
-                            connectionState: model.connectionState,
+                        if model.connectionState.isConnected && model.events.isEmpty {
+                            PrimaryCalendarCard(
+                                connectionState: model.connectionState,
+                                language: model.language,
+                                isBusy: model.isBusy,
+                                includesGmail: model.mailBadgeEnabled,
+                                onSignIn: onSignIn
+                            )
+                        }
+
+                        if shouldShowSetupChecklist {
+                            FinishSetupCard(
+                                isGoogleConnected: model.connectionState.isConnected,
+                                alertLeadMinutes: model.alertLeadMinutes,
+                                calendarNotificationsEnabled: model.calendarNotificationsEnabled,
+                                mailBadgeEnabled: model.mailBadgeEnabled,
+                                teamsCallBlockEnabled: model.teamsCallBlockEnabled,
+                                teamsCallBlockPermissionPending: model.teamsCallBlockPermissionPending,
+                                launchAtLoginEnabled: model.launchAtLoginEnabled,
+                                isBusy: model.isBusy,
+                                onEnableCalendarAlerts: onEnableCalendarAlerts,
+                                onEnableGmailBadge: onEnableGmailBadge,
+                                onEnableTeamsCallBlock: { _ = onUpdateTeamsCallBlock(true) },
+                                onEnableLaunchAtLogin: onEnableLaunchAtLogin,
+                                onDismiss: onDismissSetupChecklist
+                            )
+                        }
+
+                        UpcomingEventsView(
+                            events: model.events,
                             language: model.language,
-                            isBusy: model.isBusy,
-                            includesGmail: model.mailBadgeEnabled,
-                            onSignIn: onSignIn
+                            now: model.now,
+                            isExpanded: isUpcomingExpanded,
+                            onToggleExpanded: { isUpcomingExpanded.toggle() },
+                            onOpenURL: onOpenWorkspaceURL
                         )
-                    }
-
-                    if shouldShowSetupChecklist {
-                        FinishSetupCard(
-                            isGoogleConnected: model.connectionState.isConnected,
-                            alertLeadMinutes: model.alertLeadMinutes,
-                            calendarNotificationsEnabled: model.calendarNotificationsEnabled,
-                            mailBadgeEnabled: model.mailBadgeEnabled,
-                            teamsCallBlockEnabled: model.teamsCallBlockEnabled,
-                            teamsCallBlockPermissionPending: model.teamsCallBlockPermissionPending,
-                            launchAtLoginEnabled: model.launchAtLoginEnabled,
-                            isBusy: model.isBusy,
-                            onEnableCalendarAlerts: onEnableCalendarAlerts,
-                            onEnableGmailBadge: onEnableGmailBadge,
-                            onEnableTeamsCallBlock: { _ = onUpdateTeamsCallBlock(true) },
-                            onEnableLaunchAtLogin: onEnableLaunchAtLogin,
-                            onDismiss: onDismissSetupChecklist
-                        )
-                    }
-
-                    UpcomingEventsView(
-                        events: model.events,
-                        language: model.language,
-                        now: model.now,
-                        isExpanded: isUpcomingExpanded,
-                        onToggleExpanded: { isUpcomingExpanded.toggle() },
-                        onOpenURL: onOpenWorkspaceURL
-                    )
                     }
                     .padding(16)
                 }
