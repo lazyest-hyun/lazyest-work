@@ -1,8 +1,61 @@
 import Foundation
 import LazyestWorkCore
 
-struct Microsoft365CLIStatus: Decodable {
-    let connectedAs: String?
+private struct Microsoft365CLIConnection: Decodable {
+    let name: String
+    let active: Bool
+}
+
+private struct Microsoft365CLIAppRegistration: Decodable {
+    let appId: String
+    let tenantId: String
+}
+
+private struct Microsoft365GraphList<Value: Decodable>: Decodable {
+    let value: [Value]
+}
+
+private struct Microsoft365OwnedApplication: Decodable {
+    struct PublicClient: Decodable {
+        let redirectUris: [String]
+    }
+
+    struct RequiredResource: Decodable {
+        struct Access: Decodable {
+            let id: String
+            let type: String
+        }
+
+        let resourceAppId: String
+        let resourceAccess: [Access]
+    }
+
+    let appId: String
+    let displayName: String
+    let signInAudience: String
+    let publicClient: PublicClient
+    let requiredResourceAccess: [RequiredResource]
+
+    var isReusableLazyestWorkPersonalApp: Bool {
+        guard displayName == "Lazyest Work Personal",
+              signInAudience == "AzureADMyOrg",
+              publicClient.redirectUris.contains("http://localhost"),
+              let graphAccess = requiredResourceAccess.first(where: {
+                  $0.resourceAppId.caseInsensitiveCompare("00000003-0000-0000-c000-000000000000") == .orderedSame
+              }) else {
+            return false
+        }
+
+        let delegatedPermissionIDs = Set(
+            graphAccess.resourceAccess
+                .filter { $0.type.caseInsensitiveCompare("Scope") == .orderedSame }
+                .map { $0.id.lowercased() }
+        )
+        return delegatedPermissionIDs == [
+            "e1fe6dd8-ba31-4d61-89e7-88639da4683d",
+            "8d3c54a7-cf58-4773-bf81-c0cd6ad522bb"
+        ]
+    }
 }
 
 struct Microsoft365CLICommand {
@@ -348,7 +401,7 @@ private final class AsyncProcessExecution: @unchecked Sendable {
 
 final class Microsoft365CLIClient: @unchecked Sendable {
     private static let packageName = "@pnp/cli-microsoft365"
-    private static let graphCommandLineToolsAppID = "14d82eec-204b-4c2f-b7e8-296a70dab67e"
+    private static let azureCLIAppID = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"
     private static let tenant = "organizations"
     private static let operationGate = Microsoft365OperationGate()
 
@@ -370,49 +423,77 @@ final class Microsoft365CLIClient: @unchecked Sendable {
         }
     }
 
-    func connectionState() async -> MicrosoftConnectionState {
-        guard isAvailable else {
-            return .missingSetup
+    func bootstrapPersonalApp() async throws -> MicrosoftSetupConfig {
+        guard Self.resolvedCommand() != nil else {
+            throw AppError.api("Microsoft 365 CLI is not available. Install it before Microsoft setup.")
         }
 
-        do {
-            let output = try await run(["status", "-o", "json"], timeout: 45)
-            if let statusText = try? JSONDecoder().decode(String.self, from: Data(output.utf8)),
-               statusText.localizedCaseInsensitiveContains("logged out") {
-                return .signedOut
-            }
-            if let status = try? JSONDecoder().decode(Microsoft365CLIStatus.self, from: Data(output.utf8)) {
-                if let account = status.connectedAs?.nilIfBlank {
-                    return .connected(account: account)
+        return try await Self.operationGate.perform {
+            let originalConnectionName = try await self.activeConnectionNameUngated()
+            // Keep this connection cached and restore the user's prior active connection.
+            // Removing an m365 connection can also evict shared MSAL account tokens.
+            let setupConnectionName = "lazyest-work-setup-\(UUID().uuidString.lowercased())"
+
+            do {
+                do {
+                    _ = try await self.runUngated(
+                        [
+                            "login",
+                            "--authType", "browser",
+                            "--appId", Self.azureCLIAppID,
+                            "--tenant", Self.tenant,
+                            "--connectionName", setupConnectionName,
+                            "-o", "json"
+                        ],
+                        timeout: 300
+                    )
+                } catch {
+                    throw AppError.api(
+                        "Microsoft one-time setup sign-in failed: \(error.localizedDescription)"
+                    )
                 }
-                // Recent CLI versions emit a structurally valid status object
-                // with an empty `connectedAs` before the first browser login.
-                // That is a normal signed-out state, not a connection failure.
-                return .signedOut
+
+                if let existingConfig = await self.reusablePersonalAppUngated() {
+                    await self.restoreConnectionUngated(originalConnectionName)
+                    return existingConfig
+                }
+
+                let output: String
+                do {
+                    output = try await self.runUngated(
+                        [
+                            "entra", "app", "add",
+                            "--name", "Lazyest Work Personal",
+                            "--platform", "publicClient",
+                            "--redirectUris", "http://localhost",
+                            "--apisDelegated",
+                            "https://graph.microsoft.com/User.Read,https://graph.microsoft.com/Presence.ReadWrite",
+                            "--allowPublicClientFlows",
+                            "-o", "json"
+                        ],
+                        timeout: 180
+                    )
+                } catch {
+                    throw AppError.api(
+                        "Microsoft one-time setup could not create a personal sign-in app: \(error.localizedDescription)"
+                    )
+                }
+
+                let registration = try JSONDecoder().decode(
+                    Microsoft365CLIAppRegistration.self,
+                    from: Data(output.utf8)
+                )
+                await self.restoreConnectionUngated(originalConnectionName)
+                return try MicrosoftSetupConfig.normalized(
+                    clientID: registration.appId,
+                    tenantID: registration.tenantId,
+                    redirectMode: .loopback
+                )
+            } catch {
+                await self.restoreConnectionUngated(originalConnectionName)
+                throw error
             }
-            return output.localizedCaseInsensitiveContains("logged out") ? .signedOut : .failed
-        } catch {
-            AppLog.teamsCLI.error("Microsoft CLI connection check failed: \(error.localizedDescription, privacy: .private)")
-            return .failed
         }
-    }
-
-    func signIn() async throws {
-        _ = try await run(
-            [
-                "login",
-                "--ensure",
-                "--authType", "browser",
-                "--appId", Self.graphCommandLineToolsAppID,
-                "--tenant", Self.tenant,
-                "-o", "none"
-            ],
-            timeout: 300
-        )
-    }
-
-    func signOut() async throws {
-        _ = try await run(["logout", "-o", "none"], timeout: 60)
     }
 
     func profile() async throws -> MicrosoftProfile {
@@ -442,7 +523,7 @@ final class Microsoft365CLIClient: @unchecked Sendable {
                 "--url", "https://graph.microsoft.com/v1.0/users/\(userID.pathSegmentEncoded)/presence/setUserPreferredPresence",
                 "--body", bodyText,
                 "--content-type", "application/json",
-                "-o", "none"
+                "-o", "text"
             ],
             timeout: 60
         )
@@ -454,7 +535,7 @@ final class Microsoft365CLIClient: @unchecked Sendable {
                 "request",
                 "--method", "post",
                 "--url", "https://graph.microsoft.com/v1.0/users/\(userID.pathSegmentEncoded)/presence/clearUserPreferredPresence",
-                "-o", "none"
+                "-o", "text"
             ],
             timeout: 60
         )
@@ -473,15 +554,82 @@ final class Microsoft365CLIClient: @unchecked Sendable {
     }
 
     private func run(_ arguments: [String], timeout: TimeInterval) async throws -> String {
+        try await Self.operationGate.perform {
+            try await self.runUngated(arguments, timeout: timeout)
+        }
+    }
+
+    private func runUngated(_ arguments: [String], timeout: TimeInterval) async throws -> String {
         guard let command = Self.resolvedCommand() else {
             throw AppError.api("Microsoft 365 CLI is not available. Install Node.js/npm or m365 CLI first.")
         }
 
         let operation = arguments.first ?? "unknown"
         AppLog.teamsCLI.debug("Starting m365 operation: \(operation, privacy: .public)")
-        return try await Self.operationGate.perform {
-            let execution = AsyncProcessExecution()
-            return try await execution.run(command: command, arguments: arguments, timeout: timeout)
+        let execution = AsyncProcessExecution()
+        return try await execution.run(command: command, arguments: arguments, timeout: timeout)
+    }
+
+    private func activeConnectionNameUngated() async throws -> String? {
+        let output = try await runUngated(["connection", "list", "-o", "json"], timeout: 45)
+        let connections = try JSONDecoder().decode(
+            [Microsoft365CLIConnection].self,
+            from: Data(output.utf8)
+        )
+        return connections.first(where: { $0.active })?.name
+    }
+
+    private func restoreConnectionUngated(_ connectionName: String?) async {
+        guard let connectionName else { return }
+        do {
+            _ = try await runUngated(
+                ["connection", "use", "--name", connectionName, "-o", "text"],
+                timeout: 45
+            )
+        } catch {
+            AppLog.teamsCLI.error(
+                "Could not restore the previous m365 connection: \(error.localizedDescription, privacy: .private)"
+            )
+        }
+    }
+
+    private func reusablePersonalAppUngated() async -> MicrosoftSetupConfig? {
+        do {
+            let applicationsOutput = try await runUngated(
+                [
+                    "request",
+                    "--method", "get",
+                    "--url",
+                    "https://graph.microsoft.com/v1.0/me/ownedObjects/microsoft.graph.application?$select=appId,displayName,signInAudience,publicClient,requiredResourceAccess",
+                    "-o", "json"
+                ],
+                timeout: 60
+            )
+            let applications = try JSONDecoder().decode(
+                Microsoft365GraphList<Microsoft365OwnedApplication>.self,
+                from: Data(applicationsOutput.utf8)
+            )
+            guard let reusableApp = applications.value.first(where: {
+                $0.isReusableLazyestWorkPersonalApp
+            }) else {
+                return nil
+            }
+
+            let tenantOutput = try await runUngated(
+                ["tenant", "id", "get", "-o", "json"],
+                timeout: 60
+            )
+            let tenantID = try JSONDecoder().decode(String.self, from: Data(tenantOutput.utf8))
+            return try MicrosoftSetupConfig.normalized(
+                clientID: reusableApp.appId,
+                tenantID: tenantID,
+                redirectMode: .loopback
+            )
+        } catch {
+            AppLog.teamsCLI.debug(
+                "Could not reuse an existing personal Microsoft app: \(error.localizedDescription, privacy: .private)"
+            )
+            return nil
         }
     }
 
