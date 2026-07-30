@@ -11,17 +11,15 @@ Native macOS menu bar app for Google Workspace shortcuts, read-only Google Calen
 - Sends optional macOS desktop alerts before meetings.
 - Can turn on Do Not Disturb during accepted meetings.
 - Can ask for confirmation before Microsoft Teams outgoing call buttons and block Control-scroll zoom in Teams.
-- Can set Microsoft Teams status to Busy during accepted meetings through Microsoft 365 CLI when Microsoft Graph consent is available.
+- Can set Microsoft Teams status to Busy during accepted meetings through Microsoft Graph when delegated presence consent is available.
 - Shows an optional Gmail Inbox unread badge, capped as `99+`.
-- Stores Google sign-in in Keychain. Teams status uses Microsoft 365 CLI's stored grant unless a native Microsoft client ID is configured.
+- Stores Google and Microsoft refresh credentials in Keychain.
 
 ## Install
 
-This repository distributes source, not a prebuilt release. An AI agent can build the current source, install it into `/Applications`, launch it, and remove the temporary checkout with one command:
-
-```sh
-(workdir="$(mktemp -d)" && trap 'rm -rf "$workdir"' EXIT && git clone --depth 1 --quiet https://github.com/lazyest-hyun/lazyest-work.git "$workdir" && "$workdir/scripts/install-macos-app.sh")
-```
+Install the signed and notarized PKG from
+[GitHub Releases](https://github.com/lazyest-hyun/lazyest-work/releases/latest).
+The installer places Lazyest Work in `/Applications`.
 
 Lazyest Work uses the dedicated `com.lazyest.work` bundle identifier. The first install after migrating from GWS Menu needs fresh macOS permissions and a new Google sign-in. Fresh source builds also need publisher Google OAuth configuration before Google sign-in is available.
 
@@ -60,7 +58,7 @@ Open Settings from the gear button in Lazyest Work. Changes save automatically.
 
 - **Calendar & Mail**: meeting alerts, Do Not Disturb, and the Gmail unread badge.
 - **Teams call block**: require confirmation before supported Teams outgoing call buttons and block Control-scroll zoom inside Teams.
-- **Teams status**: optional Microsoft Graph integration through Microsoft 365 CLI.
+- **Teams status**: optional Microsoft Graph integration through browser sign-in.
 - **General**: enable Open at login or open the GitHub repository.
 - **Account**: connect or sign out of Google.
 
@@ -83,13 +81,13 @@ If Do Not Disturb was already on before a meeting starts, Lazyest Work leaves it
 Lazyest Work can set your Teams preferred presence to `Busy / Busy` during accepted Google Calendar meetings.
 
 1. Open **Settings -> Teams status**.
-2. Turn on **Teams status**.
-3. If Microsoft is not connected, approve Microsoft CLI browser sign-in once.
-4. The Microsoft 365 CLI stores the Microsoft grant and reuses it until it expires or is revoked.
+2. Install **Microsoft 365 CLI** once if the settings card asks for it.
+3. Click **Sign in**. The first sign-in uses Microsoft 365 CLI and the browser to create a single-tenant `Lazyest Work Personal` public client owned by your work account.
+4. Sign in again to that personal client and allow profile and Teams presence access. Lazyest Work stores the refresh credential in Keychain.
 
-When you connect or enable Teams status, Lazyest Work uses Microsoft 365 CLI with Microsoft's first-party **Microsoft Graph Command Line Tools** app ID (`14d82eec-204b-4c2f-b7e8-296a70dab67e`) if the app bundle has no native Microsoft client ID. If the `m365` command is not installed, Lazyest Work falls back to `npx -p @pnp/cli-microsoft365 m365`, so Node.js/npm must be available.
+The one-time setup authenticates the real Microsoft 365 CLI through Microsoft's Azure CLI public client, then creates the personal app without requesting administrator consent. The personal app registers only `User.Read` and `Presence.ReadWrite`; Lazyest Work requests those delegated permissions plus offline refresh access with PKCE and a temporary localhost callback. The generated client and tenant IDs are stored in app preferences, and the refresh credential is stored in Keychain.
 
-For a managed build, pass `GWS_MICROSOFT_CLIENT_ID` and optionally `GWS_MICROSOFT_TENANT_ID` only after the organization has approved that Microsoft Graph client. The installer does not copy stale Microsoft client IDs from older app bundles.
+This works for ordinary organization members only when their tenant allows users to register apps and self-consent to these delegated permissions. It does not bypass tenant or Conditional Access policy. A managed build can instead set `GWS_MICROSOFT_CLIENT_ID` and `GWS_MICROSOFT_TENANT_ID` after the organization configures that client and its callback.
 
 The settings card shows whether Lazyest Work set Teams preferred status to Busy, kept an existing Lazyest Work Busy value, cleared it, or is waiting for an active accepted meeting. Teams can take a few minutes to show a successful Microsoft Graph presence update.
 
@@ -134,14 +132,14 @@ The command creates `dist/LazyestWork-<version>-macOS.pkg` and its SHA-256 file.
 
 - Calendar access uses `https://www.googleapis.com/auth/calendar.events.readonly`.
 - The Gmail badge uses the non-sensitive `https://www.googleapis.com/auth/gmail.labels` scope only when enabled. Google defines it as label read/write access; Lazyest Work only performs a read of the Inbox `messagesUnread` field because Google offers no count-only scope.
-- Teams status uses Microsoft Graph delegated presence access through Microsoft 365 CLI unless a native Microsoft client ID is explicitly configured.
+- Teams status requests Microsoft Graph delegated `User.Read` and `Presence.ReadWrite` access through browser sign-in.
 - Teams call block uses macOS Accessibility and event monitoring permissions only when enabled. It does not require Microsoft Graph or Teams sign-in.
 - Lazyest Work does not read Gmail sender, subject, body, attachments, or message IDs.
 - Lazyest Work does not send desktop mail alerts.
 - Do Not Disturb during meetings uses macOS Do Not Disturb; your Focus settings decide which apps or people are allowed through.
 - Lazyest Work does not turn off a Do Not Disturb state that was already active before it touched it.
 - Google auth is handled by Google Sign-In and Keychain.
-- Microsoft auth for Teams status uses Microsoft 365 CLI unless a native Microsoft client ID is explicitly configured. Lazyest Work gets the Graph user ID from `/me`.
+- Microsoft auth uses OAuth authorization code with PKCE. Refresh credentials are stored in Keychain, and Lazyest Work gets the Graph user ID from `/me`.
 - Google product icons are downloaded locally and ignored by Git.
 
 ## Troubleshooting
@@ -151,8 +149,8 @@ The command creates `dist/LazyestWork-<version>-macOS.pkg` and its SHA-256 file.
 - **Meeting alerts do not appear**: allow Lazyest Work in **System Settings -> Notifications**, then enable Meeting alerts again.
 - **Need to verify alerts**: open **Settings -> Calendar & Mail -> Test alert** and click **Send**.
 - **Do Not Disturb during meetings asks for approval**: click **Approve**, then click **Add Shortcut** once in macOS. Lazyest Work turns the setting on automatically after approval.
-- **Teams status backend is missing**: install Node.js/npm or the `m365` CLI, then turn on **Settings -> Teams status** again.
-- **Teams status asks for organization approval**: your Microsoft organization controls Graph presence consent. Use an approved Microsoft Graph Command Line Tools grant or leave Teams status off.
+- **Microsoft sign-in is denied**: retry and allow profile and Teams presence access. Lazyest Work shows the Entra error returned by the organization instead of a generic CLI failure.
+- **Teams status asks for organization approval**: your Microsoft organization controls app registration and delegated Graph consent. Lazyest Work creates a user-owned app without administrator consent when the tenant allows it, but it cannot override a tenant denial.
 - **Teams Busy does not appear immediately**: the settings card reports the Graph result first. The Teams app can lag behind the service state for a few minutes.
 - **Teams call block stays off after enabling**: open **Settings -> Teams call block**, turn it on again, and enable **Lazyest Work** in macOS System Settings if macOS asks.
 - **Teams call block misses an icon-only Teams button**: Teams must expose that control through macOS Accessibility with a call label. Lazyest Work avoids coordinate-only guesses because they can block unrelated buttons.
@@ -175,5 +173,3 @@ swift build --package-path macos/LazyestWork
 scripts/test-lazyest-work-core.sh
 bash -n scripts/package-macos-release.sh
 ```
-
-Teams status uses Microsoft 365 CLI with Microsoft's first-party Microsoft Graph Command Line Tools app ID when no native Microsoft client is configured.
