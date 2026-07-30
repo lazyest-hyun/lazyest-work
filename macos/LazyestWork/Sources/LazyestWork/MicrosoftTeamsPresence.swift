@@ -5,7 +5,12 @@ import Foundation
 import LazyestWorkCore
 import Security
 
-struct MicrosoftSetupConfig: Equatable {
+enum MicrosoftOAuthRedirectMode: Equatable, Sendable {
+    case appScheme
+    case loopback
+}
+
+struct MicrosoftSetupConfig: Equatable, Sendable {
     static let defaultTenantID = "organizations"
     static let defaultBundleID = "com.lazyest.work"
 
@@ -27,12 +32,29 @@ struct MicrosoftSetupConfig: Equatable {
 
     var clientID: String
     var tenantID: String
+    var redirectMode: MicrosoftOAuthRedirectMode = .appScheme
 
     var isComplete: Bool {
         (try? Self.normalized(clientID: clientID, tenantID: tenantID)) != nil
     }
 
-    static func normalized(clientID: String, tenantID: String) throws -> MicrosoftSetupConfig {
+    var usesLoopbackRedirect: Bool {
+        redirectMode == .loopback
+    }
+
+    func normalized() throws -> MicrosoftSetupConfig {
+        try Self.normalized(
+            clientID: clientID,
+            tenantID: tenantID,
+            redirectMode: redirectMode
+        )
+    }
+
+    static func normalized(
+        clientID: String,
+        tenantID: String,
+        redirectMode: MicrosoftOAuthRedirectMode = .appScheme
+    ) throws -> MicrosoftSetupConfig {
         let normalizedClientID = extractedClientID(from: clientID) ?? clientID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard UUID(uuidString: normalizedClientID) != nil else {
             throw MicrosoftSetupError.missingBundleConfig
@@ -43,7 +65,11 @@ struct MicrosoftSetupConfig: Equatable {
             throw MicrosoftSetupError.missingBundleConfig
         }
 
-        return MicrosoftSetupConfig(clientID: normalizedClientID, tenantID: normalizedTenantID)
+        return MicrosoftSetupConfig(
+            clientID: normalizedClientID,
+            tenantID: normalizedTenantID,
+            redirectMode: redirectMode
+        )
     }
 
     static func extractedClientID(from input: String) -> String? {
@@ -133,11 +159,50 @@ enum MicrosoftSetupError: LocalizedError {
 }
 
 enum MicrosoftSetupSettings {
+    private static let personalClientIDKey = "microsoftPersonalClientID"
+    private static let personalTenantIDKey = "microsoftPersonalTenantID"
+
     static func load() -> MicrosoftSetupConfig {
-        MicrosoftSetupConfig(
-            clientID: Bundle.main.microsoftClientID ?? "",
-            tenantID: Bundle.main.microsoftTenantID ?? MicrosoftSetupConfig.defaultTenantID
+        if let clientID = Bundle.main.microsoftClientID {
+            return MicrosoftSetupConfig(
+                clientID: clientID,
+                tenantID: Bundle.main.microsoftTenantID ?? MicrosoftSetupConfig.defaultTenantID,
+                redirectMode: .appScheme
+            )
+        }
+
+        let defaults = UserDefaults.standard
+        if let clientID = defaults.string(forKey: personalClientIDKey)?.nilIfEmpty,
+           let tenantID = defaults.string(forKey: personalTenantIDKey)?.nilIfEmpty {
+            return MicrosoftSetupConfig(
+                clientID: clientID,
+                tenantID: tenantID,
+                redirectMode: .loopback
+            )
+        }
+
+        return MicrosoftSetupConfig(
+            clientID: "",
+            tenantID: MicrosoftSetupConfig.defaultTenantID,
+            redirectMode: .loopback
         )
+    }
+
+    static func savePersonalApp(_ config: MicrosoftSetupConfig) throws {
+        let normalized = try MicrosoftSetupConfig.normalized(
+            clientID: config.clientID,
+            tenantID: config.tenantID,
+            redirectMode: .loopback
+        )
+        let defaults = UserDefaults.standard
+        defaults.set(normalized.clientID, forKey: personalClientIDKey)
+        defaults.set(normalized.tenantID, forKey: personalTenantIDKey)
+    }
+
+    static func clearPersonalApp() {
+        let defaults = UserDefaults.standard
+        defaults.removeObject(forKey: personalClientIDKey)
+        defaults.removeObject(forKey: personalTenantIDKey)
     }
 }
 
@@ -182,8 +247,8 @@ enum MicrosoftConnectionState: Equatable {
 
 enum MicrosoftTeamsOperation: Equatable {
     case idle
-    case checkingConnection
     case installingCLI
+    case settingUp
     case signingIn
     case signingOut
 
@@ -196,6 +261,8 @@ struct MicrosoftTokenSet: Codable, Equatable {
     var expiresAt: Date
     var accountName: String?
     var userID: String?
+    var clientID: String?
+    var tenantID: String?
 
     func hasValidAccessToken(now: Date = Date()) -> Bool {
         expiresAt.timeIntervalSince(now) > 60
@@ -211,6 +278,236 @@ struct MicrosoftTokenResponse: Decodable {
         case accessToken = "access_token"
         case refreshToken = "refresh_token"
         case expiresIn = "expires_in"
+    }
+}
+
+private struct MicrosoftAuthorizationGrant {
+    let code: String
+    let redirectURI: String
+}
+
+private final class MicrosoftOAuthLoopbackServer: @unchecked Sendable {
+    private static let callbackTimeoutMilliseconds: Int32 = 300_000
+    private static let maximumRequestBytes = 65_536
+
+    private let descriptor: Int32
+    private let descriptorLock = NSLock()
+    private var isClosed = false
+
+    let redirectURI: String
+
+    init() throws {
+        let descriptor = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+        guard descriptor >= 0 else {
+            throw AppError.api("Microsoft sign-in could not start a local callback.")
+        }
+
+        var reuseAddress: Int32 = 1
+        _ = withUnsafePointer(to: &reuseAddress) {
+            Darwin.setsockopt(
+                descriptor,
+                SOL_SOCKET,
+                SO_REUSEADDR,
+                $0,
+                socklen_t(MemoryLayout<Int32>.size)
+            )
+        }
+
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = 0
+        address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+
+        let bindStatus = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard bindStatus == 0, Darwin.listen(descriptor, 1) == 0 else {
+            Darwin.close(descriptor)
+            throw AppError.api("Microsoft sign-in could not open a local callback.")
+        }
+
+        var boundAddress = sockaddr_in()
+        var boundAddressLength = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let nameStatus = withUnsafeMutablePointer(to: &boundAddress) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.getsockname(descriptor, $0, &boundAddressLength)
+            }
+        }
+        guard nameStatus == 0 else {
+            Darwin.close(descriptor)
+            throw AppError.api("Microsoft sign-in could not read its local callback.")
+        }
+
+        self.descriptor = descriptor
+        redirectURI = "http://localhost:\(UInt16(bigEndian: boundAddress.sin_port))"
+    }
+
+    deinit {
+        closeListener()
+    }
+
+    func waitForCallback(expectedState: String) async throws -> URL {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    do {
+                        continuation.resume(
+                            returning: try self.waitForCallbackSync(expectedState: expectedState)
+                        )
+                    } catch {
+                        continuation.resume(throwing: error)
+                    }
+                }
+            }
+        } onCancel: {
+            self.closeListener()
+        }
+    }
+
+    private func waitForCallbackSync(expectedState: String) throws -> URL {
+        defer { closeListener() }
+
+        var descriptorToPoll = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
+        let pollStatus = Darwin.poll(
+            &descriptorToPoll,
+            1,
+            Self.callbackTimeoutMilliseconds
+        )
+        guard pollStatus > 0, descriptorToPoll.revents & Int16(POLLIN) != 0 else {
+            throw AppError.api(
+                pollStatus == 0
+                    ? "Microsoft sign-in timed out."
+                    : "Microsoft sign-in local callback failed."
+            )
+        }
+
+        let clientDescriptor = Darwin.accept(descriptor, nil, nil)
+        guard clientDescriptor >= 0 else {
+            throw AppError.api("Microsoft sign-in local callback failed.")
+        }
+        defer { Darwin.close(clientDescriptor) }
+
+        var suppressSIGPIPE: Int32 = 1
+        _ = withUnsafePointer(to: &suppressSIGPIPE) {
+            Darwin.setsockopt(
+                clientDescriptor,
+                SOL_SOCKET,
+                SO_NOSIGPIPE,
+                $0,
+                socklen_t(MemoryLayout<Int32>.size)
+            )
+        }
+
+        let request = try receiveRequest(from: clientDescriptor)
+        let callbackURL = try callbackURL(from: request)
+        let queryItems = URLComponents(
+            url: callbackURL,
+            resolvingAgainstBaseURL: false
+        )?.queryItems ?? []
+        sendResponse(
+            to: clientDescriptor,
+            succeeded: queryItems.contains(where: { $0.name == "code" }) &&
+                queryItems.first(where: { $0.name == "state" })?.value == expectedState
+        )
+        return callbackURL
+    }
+
+    private func receiveRequest(from descriptor: Int32) throws -> String {
+        var requestData = Data()
+        var buffer = [UInt8](repeating: 0, count: 4_096)
+
+        while requestData.count < Self.maximumRequestBytes {
+            let count = buffer.withUnsafeMutableBytes {
+                Darwin.recv(descriptor, $0.baseAddress, $0.count, 0)
+            }
+            guard count > 0 else { break }
+            requestData.append(contentsOf: buffer.prefix(count))
+            if requestData.range(of: Data("\r\n\r\n".utf8)) != nil {
+                break
+            }
+        }
+
+        guard let request = String(data: requestData, encoding: .utf8),
+              request.contains("\r\n\r\n") else {
+            throw AppError.api("Microsoft sign-in returned an invalid local callback.")
+        }
+        return request
+    }
+
+    private func callbackURL(from request: String) throws -> URL {
+        guard let requestLine = request.components(separatedBy: "\r\n").first else {
+            throw AppError.api("Microsoft sign-in returned an invalid local callback.")
+        }
+        let components = requestLine.split(separator: " ", maxSplits: 2)
+        guard components.count == 3,
+              components[0] == "GET",
+              components[1].hasPrefix("/"),
+              let callbackURL = URL(string: redirectURI + String(components[1])) else {
+            throw AppError.api("Microsoft sign-in returned an invalid local callback.")
+        }
+        return callbackURL
+    }
+
+    private func sendResponse(to descriptor: Int32, succeeded: Bool) {
+        let title = succeeded ? "Microsoft sign-in completed" : "Microsoft sign-in did not complete"
+        let message = succeeded
+            ? "Return to Lazyest Work. You can close this tab."
+            : "Return to Lazyest Work for the detailed error."
+        let body = """
+        <!doctype html>
+        <html lang="en">
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>\(title)</title>
+        </head>
+        <body>
+          <main>
+            <h1>\(title)</h1>
+            <p>\(message)</p>
+          </main>
+        </body>
+        </html>
+        """
+        let response = """
+        HTTP/1.1 200 OK\r
+        Content-Type: text/html; charset=utf-8\r
+        Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'\r
+        Cache-Control: no-store\r
+        Connection: close\r
+        Content-Length: \(body.utf8.count)\r
+        \r
+        \(body)
+        """
+        let responseData = Data(response.utf8)
+        responseData.withUnsafeBytes { bytes in
+            guard let baseAddress = bytes.baseAddress else { return }
+            var sent = 0
+            while sent < bytes.count {
+                let count = Darwin.send(
+                    descriptor,
+                    baseAddress.advanced(by: sent),
+                    bytes.count - sent,
+                    0
+                )
+                guard count > 0 else { return }
+                sent += count
+            }
+        }
+    }
+
+    private func closeListener() {
+        descriptorLock.lock()
+        guard !isClosed else {
+            descriptorLock.unlock()
+            return
+        }
+        isClosed = true
+        Darwin.close(descriptor)
+        descriptorLock.unlock()
     }
 }
 
@@ -294,32 +591,36 @@ final class MicrosoftGraphAuthClient: NSObject, ASWebAuthenticationPresentationC
     }
 
     func connectionState() -> MicrosoftConnectionState {
-        guard (try? MicrosoftSetupConfig.normalized(clientID: config.clientID, tenantID: config.tenantID)) != nil else {
+        guard let normalized = try? config.normalized() else {
             return .missingSetup
         }
-        guard let tokenSet = try? tokenStore.load() else {
+        guard let tokenSet = try? tokenStore.load(),
+              tokenMatchesConfiguration(tokenSet, config: normalized) else {
             return .signedOut
         }
         return .connected(account: tokenSet.accountName)
     }
 
     func signIn(config: MicrosoftSetupConfig) async throws {
-        let normalized = try MicrosoftSetupConfig.normalized(clientID: config.clientID, tenantID: config.tenantID)
+        let normalized = try config.normalized()
         configure(normalized)
 
         let verifier = PKCE.randomVerifier()
         let state = UUID().uuidString
-        let code = try await authorizationCode(verifier: verifier, state: state, config: normalized)
-        var tokenSet = try await exchangeCode(code, verifier: verifier, config: normalized)
+        let grant = try await authorizationGrant(verifier: verifier, state: state, config: normalized)
+        var tokenSet = try await exchangeCode(grant, verifier: verifier, config: normalized)
         let profile = try await fetchProfile(accessToken: tokenSet.accessToken)
         tokenSet.accountName = profile.userPrincipalName ?? profile.displayName
         tokenSet.userID = profile.id
+        tokenSet.clientID = normalized.clientID
+        tokenSet.tenantID = normalized.tenantID
         try tokenStore.save(tokenSet)
     }
 
     func accessToken() async throws -> String {
-        let normalized = try MicrosoftSetupConfig.normalized(clientID: config.clientID, tenantID: config.tenantID)
-        guard var tokenSet = try tokenStore.load() else {
+        let normalized = try config.normalized()
+        guard var tokenSet = try tokenStore.load(),
+              tokenMatchesConfiguration(tokenSet, config: normalized) else {
             throw AppError.microsoftNotSignedIn
         }
         if tokenSet.hasValidAccessToken() {
@@ -332,7 +633,9 @@ final class MicrosoftGraphAuthClient: NSObject, ASWebAuthenticationPresentationC
     }
 
     func graphUserID() async throws -> String {
-        guard var tokenSet = try tokenStore.load() else {
+        let normalized = try config.normalized()
+        guard var tokenSet = try tokenStore.load(),
+              tokenMatchesConfiguration(tokenSet, config: normalized) else {
             throw AppError.microsoftNotSignedIn
         }
         if let userID = tokenSet.userID?.nilIfBlank {
@@ -359,12 +662,22 @@ final class MicrosoftGraphAuthClient: NSObject, ASWebAuthenticationPresentationC
         authWindow.present(message: "Sign in with Microsoft to update Teams status.")
     }
 
-    private func authorizationCode(
+    private func authorizationGrant(
         verifier: String,
         state: String,
         config: MicrosoftSetupConfig
-    ) async throws -> String {
-        let authURL = try authorizationURL(verifier: verifier, state: state, config: config)
+    ) async throws -> MicrosoftAuthorizationGrant {
+        if config.usesLoopbackRedirect {
+            return try await loopbackAuthorizationGrant(verifier: verifier, state: state, config: config)
+        }
+
+        let redirectURI = MicrosoftSetupConfig.redirectURI
+        let authURL = try authorizationURL(
+            verifier: verifier,
+            state: state,
+            redirectURI: redirectURI,
+            config: config
+        )
         return try await withCheckedThrowingContinuation { continuation in
             let session = ASWebAuthenticationSession(
                 url: authURL,
@@ -383,7 +696,12 @@ final class MicrosoftGraphAuthClient: NSObject, ASWebAuthenticationPresentationC
                     return
                 }
                 do {
-                    continuation.resume(returning: try Self.authorizationCode(from: callbackURL, expectedState: state))
+                    continuation.resume(
+                        returning: MicrosoftAuthorizationGrant(
+                            code: try Self.authorizationCode(from: callbackURL, expectedState: state),
+                            redirectURI: redirectURI
+                        )
+                    )
                 } catch {
                     continuation.resume(throwing: error)
                 }
@@ -398,21 +716,49 @@ final class MicrosoftGraphAuthClient: NSObject, ASWebAuthenticationPresentationC
         }
     }
 
+    private func loopbackAuthorizationGrant(
+        verifier: String,
+        state: String,
+        config: MicrosoftSetupConfig
+    ) async throws -> MicrosoftAuthorizationGrant {
+        let server = try MicrosoftOAuthLoopbackServer()
+        let authURL = try authorizationURL(
+            verifier: verifier,
+            state: state,
+            redirectURI: server.redirectURI,
+            config: config
+        )
+
+        _ = authWindow.present(message: "Complete Microsoft sign-in in your browser.")
+        defer { authWindow.hide() }
+        guard NSWorkspace.shared.open(authURL) else {
+            throw AppError.api("Microsoft sign-in could not open your browser.")
+        }
+
+        let callbackURL = try await server.waitForCallback(expectedState: state)
+        return MicrosoftAuthorizationGrant(
+            code: try Self.authorizationCode(from: callbackURL, expectedState: state),
+            redirectURI: server.redirectURI
+        )
+    }
+
     private func authorizationURL(
         verifier: String,
         state: String,
+        redirectURI: String,
         config: MicrosoftSetupConfig
     ) throws -> URL {
         var components = URLComponents(string: "https://login.microsoftonline.com/\(config.tenantID)/oauth2/v2.0/authorize")!
         components.queryItems = [
             URLQueryItem(name: "client_id", value: config.clientID),
             URLQueryItem(name: "response_type", value: "code"),
-            URLQueryItem(name: "redirect_uri", value: MicrosoftSetupConfig.redirectURI),
+            URLQueryItem(name: "redirect_uri", value: redirectURI),
             URLQueryItem(name: "response_mode", value: "query"),
             URLQueryItem(name: "scope", value: scopes.joined(separator: " ")),
             URLQueryItem(name: "state", value: state),
             URLQueryItem(name: "code_challenge", value: PKCE.challenge(for: verifier)),
-            URLQueryItem(name: "code_challenge_method", value: "S256")
+            URLQueryItem(name: "code_challenge_method", value: "S256"),
+            URLQueryItem(name: "prompt", value: "select_account")
         ]
         guard let url = components.url else {
             throw AppError.invalidResponse
@@ -427,7 +773,10 @@ final class MicrosoftGraphAuthClient: NSObject, ASWebAuthenticationPresentationC
         let items = components.queryItems ?? []
         if let error = items.first(where: { $0.name == "error" })?.value {
             let description = items.first(where: { $0.name == "error_description" })?.value
-            throw AppError.api([error, description].compactMap(\.self).joined(separator: ": "))
+            throw AppError.api(
+                "Microsoft sign-in failed: " +
+                    [error, description].compactMap(\.self).joined(separator: ": ")
+            )
         }
         guard items.first(where: { $0.name == "state" })?.value == expectedState else {
             throw AppError.api("Microsoft sign-in returned an invalid state.")
@@ -439,7 +788,7 @@ final class MicrosoftGraphAuthClient: NSObject, ASWebAuthenticationPresentationC
     }
 
     private func exchangeCode(
-        _ code: String,
+        _ grant: MicrosoftAuthorizationGrant,
         verifier: String,
         config: MicrosoftSetupConfig
     ) async throws -> MicrosoftTokenSet {
@@ -447,8 +796,8 @@ final class MicrosoftGraphAuthClient: NSObject, ASWebAuthenticationPresentationC
             parameters: [
                 "client_id": config.clientID,
                 "scope": scopes.joined(separator: " "),
-                "code": code,
-                "redirect_uri": MicrosoftSetupConfig.redirectURI,
+                "code": grant.code,
+                "redirect_uri": grant.redirectURI,
                 "grant_type": "authorization_code",
                 "code_verifier": verifier
             ],
@@ -462,7 +811,9 @@ final class MicrosoftGraphAuthClient: NSObject, ASWebAuthenticationPresentationC
             refreshToken: refreshToken,
             expiresAt: Date().addingTimeInterval(TimeInterval(response.expiresIn)),
             accountName: nil,
-            userID: nil
+            userID: nil,
+            clientID: config.clientID,
+            tenantID: config.tenantID
         )
     }
 
@@ -484,8 +835,22 @@ final class MicrosoftGraphAuthClient: NSObject, ASWebAuthenticationPresentationC
             refreshToken: response.refreshToken?.nilIfBlank ?? tokenSet.refreshToken,
             expiresAt: Date().addingTimeInterval(TimeInterval(response.expiresIn)),
             accountName: tokenSet.accountName,
-            userID: tokenSet.userID
+            userID: tokenSet.userID,
+            clientID: config.clientID,
+            tenantID: config.tenantID
         )
+    }
+
+    private func tokenMatchesConfiguration(
+        _ tokenSet: MicrosoftTokenSet,
+        config: MicrosoftSetupConfig
+    ) -> Bool {
+        guard let tokenClientID = tokenSet.clientID,
+              let tokenTenantID = tokenSet.tenantID else {
+            return false
+        }
+        return tokenClientID.caseInsensitiveCompare(config.clientID) == .orderedSame &&
+            tokenTenantID.caseInsensitiveCompare(config.tenantID) == .orderedSame
     }
 
     private func tokenRequest<T: Decodable>(parameters: [String: String], tenantID: String) async throws -> T {
@@ -630,7 +995,9 @@ final class MicrosoftTeamsPresenceService {
     }
 
     func clearLocalManagedState() {
-        clearManagedState(UserDefaults.standard)
+        let defaults = UserDefaults.standard
+        clearManagedState(defaults)
+        clearPausedEvent(defaults)
     }
 
     private func setBusyIfNeeded(
