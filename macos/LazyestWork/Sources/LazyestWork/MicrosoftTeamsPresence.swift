@@ -281,6 +281,16 @@ struct MicrosoftTokenResponse: Decodable {
     }
 }
 
+private struct MicrosoftTokenErrorResponse: Decodable {
+    let error: String
+    let errorDescription: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case error
+        case errorDescription = "error_description"
+    }
+}
+
 private struct MicrosoftAuthorizationGrant {
     let code: String
     let redirectURI: String
@@ -640,6 +650,13 @@ final class MicrosoftGraphAuthClient: NSObject, ASWebAuthenticationPresentationC
     private var config = MicrosoftSetupSettings.load()
     private var currentSession: ASWebAuthenticationSession?
     private let scopes = ["offline_access", "User.Read", "Presence.ReadWrite"]
+    /// Token endpoint errors that only a fresh interactive sign-in can clear.
+    private static let reauthenticationErrorCodes: Set<String> = [
+        "invalid_grant",
+        "interaction_required",
+        "login_required",
+        "consent_required"
+    ]
 
     init(authWindow: AuthWindow) {
         self.authWindow = authWindow
@@ -686,7 +703,15 @@ final class MicrosoftGraphAuthClient: NSObject, ASWebAuthenticationPresentationC
             return tokenSet.accessToken
         }
 
-        tokenSet = try await refresh(tokenSet, config: normalized)
+        do {
+            tokenSet = try await refresh(tokenSet, config: normalized)
+        } catch AppError.microsoftNotSignedIn {
+            // The stored credential is dead. Dropping it moves the account to
+            // signed out so the user is asked to reconnect, instead of leaving
+            // a connection that reads as live and fails on every use.
+            try? tokenStore.clear()
+            throw AppError.microsoftNotSignedIn
+        }
         try tokenStore.save(tokenSet)
         return tokenSet.accessToken
     }
@@ -904,9 +929,13 @@ final class MicrosoftGraphAuthClient: NSObject, ASWebAuthenticationPresentationC
         _ tokenSet: MicrosoftTokenSet,
         config: MicrosoftSetupConfig
     ) -> Bool {
+        // Tokens saved before the client and tenant were recorded carry
+        // neither value. Reading that as a mismatch signs the user out on
+        // upgrade even though the stored credential still works. A credential
+        // that really is stale now fails at refresh and is discarded there.
         guard let tokenClientID = tokenSet.clientID,
               let tokenTenantID = tokenSet.tenantID else {
-            return false
+            return true
         }
         return tokenClientID.caseInsensitiveCompare(config.clientID) == .orderedSame &&
             tokenTenantID.caseInsensitiveCompare(config.tenantID) == .orderedSame
@@ -924,6 +953,21 @@ final class MicrosoftGraphAuthClient: NSObject, ASWebAuthenticationPresentationC
             throw AppError.invalidResponse
         }
         guard (200..<300).contains(http.statusCode) else {
+            if let failure = try? JSONDecoder().decode(
+                MicrosoftTokenErrorResponse.self,
+                from: data
+            ) {
+                // A revoked or expired refresh token never recovers on retry,
+                // so it has to be told apart from a transient failure. Reported
+                // as a generic error it leaves the account reading as connected
+                // while every presence update silently fails.
+                if Self.reauthenticationErrorCodes.contains(failure.error) {
+                    throw AppError.microsoftNotSignedIn
+                }
+                throw AppError.api(
+                    "Microsoft token request failed: \(failure.errorDescription?.nilIfBlank ?? failure.error)"
+                )
+            }
             let body = String(data: data, encoding: .utf8) ?? "HTTP \(http.statusCode)"
             throw AppError.api("Microsoft token request failed: \(body)")
         }
@@ -1051,6 +1095,12 @@ final class MicrosoftTeamsPresenceService {
             }
         }
         clearManagedState(defaults)
+    }
+
+    /// True while a Busy set by this app is still recorded as ours, whether or
+    /// not Microsoft is currently connected.
+    var hasManagedSession: Bool {
+        loadManagedSession(UserDefaults.standard) != nil
     }
 
     func clearLocalManagedState() {
