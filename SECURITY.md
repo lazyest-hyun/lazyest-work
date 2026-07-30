@@ -20,6 +20,16 @@ Calendar access is read-only. The optional Gmail badge uses Gmail label unread
 counts only, not message sender, subject, body, or attachments. Lazyest Work does not
 send desktop mail alerts in the public-safe scope set.
 
+For an unmanaged installation, Microsoft Teams presence setup uses the real
+Microsoft 365 CLI once to create a single-tenant, user-owned public client
+without administrator consent. Lazyest Work stores its public client and tenant
+IDs in app preferences. Sign-in then uses OAuth authorization code with PKCE and
+a temporary localhost callback, requests delegated `User.Read` and
+`Presence.ReadWrite` access, and stores the refresh credential in Keychain. No
+Microsoft client secret is created or bundled. The CLI keeps its normal local
+connection cache; Lazyest Work restores any previously active CLI connection
+after setup and does not run global CLI logout.
+
 Do not commit:
 
 - OAuth client secrets
