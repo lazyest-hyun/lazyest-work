@@ -371,6 +371,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var meetingFocusSyncTask: Task<Void, Never>?
     private var meetingFocusSyncGeneration = UUID()
     private var teamsPresenceTask: Task<Void, Never>?
+    private var orphanedManagedPresenceReleaseAttempted = false
     private var isRefreshingEvents = false
     private var isRefreshingGmail = false
     private var statusIconUnreadText: String?
@@ -1235,6 +1236,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
     }
 
+    /// A Busy this app set can outlive the connection that set it — upgrading
+    /// from a build that signed in through the CLI leaves a managed session
+    /// behind while the new connection state reads as signed out, and the sync
+    /// path returns before it can ever clear it. Try once per launch to release
+    /// it, since nothing else will.
+    private func releaseOrphanedManagedPresence() {
+        guard !orphanedManagedPresenceReleaseAttempted,
+              teamsPresenceService.hasManagedSession else {
+            return
+        }
+        orphanedManagedPresenceReleaseAttempted = true
+        Task {
+            do {
+                try await teamsPresenceService.clearManagedPresenceIfNeeded()
+                teamsPresenceService.clearLocalManagedState()
+            } catch {
+                AppLog.teamsPresence.debug(
+                    "Could not release an orphaned Teams Busy: \(error.localizedDescription, privacy: .private)"
+                )
+            }
+        }
+    }
+
     private func signOutMicrosoftTeams() {
         guard model.teamsOperation == .idle else { return }
         model.teamsOperation = .signingOut
@@ -1250,9 +1274,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 presenceClearError = error
             }
 
+            // The managed session is the only record that this app owns the
+            // Busy currently set on the server. Dropping it after a failed
+            // clear strands that presence for as long as it lasts, because
+            // nothing can find it again. Keep it so a later attempt retries.
+            let canForgetManagedSession = presenceClearError == nil
             do {
                 try microsoftAuthClient.signOut()
-                teamsPresenceService.clearLocalManagedState()
+                if canForgetManagedSession {
+                    teamsPresenceService.clearLocalManagedState()
+                }
                 refreshMicrosoftConnectionState()
                 model.lastError = presenceClearError.map(userFacingError)
                 model.lastErrorRecovery = nil
@@ -1260,7 +1291,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                     ? "Signed out. Teams Busy is off."
                     : "Signed out. The previous Teams Busy status could not be cleared."
             } catch {
-                teamsPresenceService.clearLocalManagedState()
+                if canForgetManagedSession {
+                    teamsPresenceService.clearLocalManagedState()
+                }
                 model.lastError = userFacingError(error)
                 model.lastErrorRecovery = nil
                 model.teamsPresenceStatusText = "Microsoft sign-out did not finish."
@@ -1386,6 +1419,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             case .connected:
                 break
             }
+            releaseOrphanedManagedPresence()
             refreshUI()
             return
         }
