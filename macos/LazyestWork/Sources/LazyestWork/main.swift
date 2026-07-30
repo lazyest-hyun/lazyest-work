@@ -371,10 +371,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var meetingFocusSyncTask: Task<Void, Never>?
     private var meetingFocusSyncGeneration = UUID()
     private var teamsPresenceTask: Task<Void, Never>?
-    private var microsoftCLIConnectionTask: Task<Void, Never>?
     private var isRefreshingEvents = false
     private var isRefreshingGmail = false
-    private var microsoftCLIConnectionLastCheckedAt: Date?
     private var statusIconUnreadText: String?
     private var renderedStatusTitle: String?
     private var text: AppText {
@@ -1082,60 +1080,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         model.meetingFocusApprovalPending = false
     }
 
-    private func refreshMicrosoftConnectionState(allowCLIStatusCheck: Bool = false) {
+    private func refreshMicrosoftConnectionState() {
         model.teamsSetupConfig = MicrosoftSetupSettings.load()
         microsoftAuthClient.configure(model.teamsSetupConfig)
-        var shouldNormalizeAvailability = true
         if model.teamsSetupConfig.isComplete {
             model.teamsConnectionState = microsoftAuthClient.connectionState()
-        } else if microsoftCLIClient.isAvailable {
-            if model.teamsConnectionState == .missingSetup {
-                model.teamsConnectionState = .signedOut
-            }
-            refreshMicrosoftCLIConnectionState(
-                force: allowCLIStatusCheck && !model.teamsConnectionState.isConnected
-            )
-            if model.teamsPresenceEnabled, !model.teamsConnectionState.isConnected {
-                shouldNormalizeAvailability = false
-            }
         } else {
-            model.teamsConnectionState = .missingSetup
+            model.teamsConnectionState = microsoftCLIClient.isAvailable ? .signedOut : .missingSetup
         }
-        if shouldNormalizeAvailability {
-            normalizeTeamsPresenceAvailability()
-        }
-    }
-
-    private func refreshMicrosoftCLIConnectionState(force: Bool = false) {
-        guard microsoftCLIConnectionTask == nil, model.teamsOperation == .idle else { return }
-        if !force,
-           let lastCheckedAt = microsoftCLIConnectionLastCheckedAt,
-           Date().timeIntervalSince(lastCheckedAt) < 300 {
-            return
-        }
-        model.teamsOperation = .checkingConnection
-        microsoftCLIConnectionTask = Task {
-            let state = await microsoftCLIClient.connectionState()
-            guard !Task.isCancelled else {
-                microsoftCLIConnectionTask = nil
-                model.teamsOperation = .idle
-                return
-            }
-            model.teamsConnectionState = state
-            microsoftCLIConnectionLastCheckedAt = Date()
-            if state.isConnected, !model.teamsPresenceEnabled {
-                model.teamsPresenceStatusText = "Connected. Turn on Teams Busy for accepted meetings."
-            }
-            if model.teamsPresenceEnabled, !state.isConnected {
-                normalizeTeamsPresenceAvailability()
-            }
-            microsoftCLIConnectionTask = nil
-            model.teamsOperation = .idle
-            refreshUI()
-            if state.isConnected, model.teamsPresenceEnabled {
-                syncTeamsPresence()
-            }
-        }
+        normalizeTeamsPresenceAvailability()
     }
 
     private func normalizeTeamsPresenceAvailability() {
@@ -1145,9 +1098,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         case .connected:
             return
         case .missingSetup:
-            model.teamsPresenceStatusText = "Off. Microsoft 365 CLI is not available."
+            model.teamsPresenceStatusText = "Off. Install Microsoft 365 CLI for one-time setup."
         case .signedOut:
-            model.teamsPresenceStatusText = "Off. Connect Microsoft with CLI before turning on Teams Busy."
+            model.teamsPresenceStatusText = "Off. Complete Microsoft setup before turning on Teams Busy."
         case .failed:
             model.teamsPresenceStatusText = "Microsoft connection check failed."
         }
@@ -1164,7 +1117,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             do {
                 try await microsoftCLIClient.installIfNeeded()
                 model.teamsConnectionState = .signedOut
-                microsoftCLIConnectionLastCheckedAt = nil
                 model.lastError = nil
                 model.lastErrorRecovery = nil
             } catch {
@@ -1180,15 +1132,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private func connectMicrosoftTeams() {
         guard model.teamsOperation == .idle else { return }
         guard model.teamsSetupConfig.isComplete else {
-            connectMicrosoftTeamsWithCLI()
+            setUpMicrosoftTeams()
             return
         }
 
         do {
-            let config = try MicrosoftSetupConfig.normalized(
-                clientID: model.teamsSetupConfig.clientID,
-                tenantID: model.teamsSetupConfig.tenantID
-            )
+            let config = try model.teamsSetupConfig.normalized()
             model.teamsSetupConfig = config
             microsoftAuthClient.configure(config)
         } catch {
@@ -1209,21 +1158,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             do {
                 try? await teamsPresenceService.clearManagedPresenceIfNeeded()
                 try await microsoftAuthClient.signIn(config: model.teamsSetupConfig)
-                refreshMicrosoftConnectionState(allowCLIStatusCheck: true)
+                teamsPresenceService.clearLocalManagedState()
+                refreshMicrosoftConnectionState()
                 model.teamsPresenceStatusText = "Connected. Turn on Teams Busy for accepted meetings."
                 syncTeamsPresence()
             } catch {
                 model.lastError = userFacingError(error)
                 model.lastErrorRecovery = nil
                 model.teamsPresenceStatusText = "Microsoft sign-in did not finish."
-                refreshMicrosoftConnectionState(allowCLIStatusCheck: true)
+                if model.teamsSetupConfig.usesLoopbackRedirect,
+                   error.localizedDescription.localizedCaseInsensitiveContains("aadsts700016") {
+                    MicrosoftSetupSettings.clearPersonalApp()
+                    try? microsoftAuthClient.signOut()
+                }
+                refreshMicrosoftConnectionState()
             }
             model.teamsOperation = .idle
             refreshUI()
         }
     }
 
-    private func connectMicrosoftTeamsWithCLI() {
+    private func setUpMicrosoftTeams() {
         guard model.teamsOperation == .idle else { return }
         guard microsoftCLIClient.isAvailable else {
             model.lastError = "Install Microsoft 365 CLI first."
@@ -1231,26 +1186,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             refreshUI()
             return
         }
-        model.teamsOperation = .signingIn
+        model.teamsOperation = .settingUp
         model.lastError = nil
         model.lastErrorRecovery = nil
-        model.teamsPresenceStatusText = "Opening Microsoft CLI sign-in."
+        model.teamsPresenceStatusText = "Creating your Microsoft sign-in app for one-time setup."
         refreshUI()
 
         Task {
             do {
-                try? await teamsPresenceService.clearManagedPresenceIfNeeded()
-                try await microsoftCLIClient.signIn()
-                model.teamsConnectionState = await microsoftCLIClient.connectionState()
-                microsoftCLIConnectionLastCheckedAt = Date()
-                model.teamsPresenceStatusText = "Connected with Microsoft CLI. Turn on Teams Busy for accepted meetings."
+                let config = try await microsoftCLIClient.bootstrapPersonalApp()
+                try MicrosoftSetupSettings.savePersonalApp(config)
+                model.teamsSetupConfig = MicrosoftSetupSettings.load()
+                microsoftAuthClient.configure(model.teamsSetupConfig)
+                model.teamsOperation = .signingIn
+                model.teamsPresenceStatusText = "Opening Microsoft sign-in."
+                refreshUI()
+
+                try await microsoftAuthClient.signIn(config: model.teamsSetupConfig)
+                teamsPresenceService.clearLocalManagedState()
+                refreshMicrosoftConnectionState()
+                model.teamsPresenceStatusText = "Connected. Turn on Teams Busy for accepted meetings."
                 syncTeamsPresence()
             } catch {
                 model.lastError = userFacingError(error)
                 model.lastErrorRecovery = nil
-                model.teamsPresenceStatusText = "Microsoft CLI sign-in did not finish."
-                model.teamsConnectionState = .signedOut
-                microsoftCLIConnectionLastCheckedAt = nil
+                model.teamsPresenceStatusText = "Microsoft setup did not finish."
+                refreshMicrosoftConnectionState()
             }
             model.teamsOperation = .idle
             refreshUI()
@@ -1265,21 +1226,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         model.teamsPresenceStatusText = "Signing out of Microsoft."
         teamsPresenceTask?.cancel()
         teamsPresenceTask = Task {
+            var presenceClearError: Error?
             do {
                 try await teamsPresenceService.clearManagedPresenceIfNeeded()
-                if model.teamsSetupConfig.isComplete {
-                    try microsoftAuthClient.signOut()
-                } else {
-                    try await microsoftCLIClient.signOut()
-                    model.teamsConnectionState = .signedOut
-                    microsoftCLIConnectionLastCheckedAt = Date()
-                }
-                teamsPresenceService.clearLocalManagedState()
-                refreshMicrosoftConnectionState(allowCLIStatusCheck: true)
-                model.lastError = nil
-                model.lastErrorRecovery = nil
-                model.teamsPresenceStatusText = "Signed out. Teams Busy is off."
             } catch {
+                presenceClearError = error
+            }
+
+            do {
+                try microsoftAuthClient.signOut()
+                teamsPresenceService.clearLocalManagedState()
+                refreshMicrosoftConnectionState()
+                model.lastError = presenceClearError.map(userFacingError)
+                model.lastErrorRecovery = nil
+                model.teamsPresenceStatusText = presenceClearError == nil
+                    ? "Signed out. Teams Busy is off."
+                    : "Signed out. The previous Teams Busy status could not be cleared."
+            } catch {
+                teamsPresenceService.clearLocalManagedState()
                 model.lastError = userFacingError(error)
                 model.lastErrorRecovery = nil
                 model.teamsPresenceStatusText = "Microsoft sign-out did not finish."
@@ -1303,37 +1267,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
 
         if !model.teamsSetupConfig.isComplete {
-            guard microsoftCLIClient.isAvailable else {
-                model.teamsPresenceEnabled = false
-                model.teamsPresenceStatusText = "Off. Microsoft 365 CLI is not available."
-                model.lastError = "Microsoft 365 CLI is not available. Install Node.js/npm or m365 CLI first."
-                model.lastErrorRecovery = nil
-                refreshUI()
-                updateScheduledMeetingRefreshes()
-                return false
-            }
+            model.teamsPresenceEnabled = false
+            model.teamsPresenceStatusText = "Complete Microsoft setup before turning on Teams Busy."
+            model.lastError = microsoftCLIClient.isAvailable
+                ? "Complete Microsoft setup first."
+                : "Install Microsoft 365 CLI, then complete Microsoft setup."
+            model.lastErrorRecovery = nil
+            refreshUI()
+            updateScheduledMeetingRefreshes()
+            return false
+        }
 
-            if !model.teamsConnectionState.isConnected {
-                model.teamsPresenceEnabled = true
-                model.lastError = nil
-                model.lastErrorRecovery = nil
-                model.teamsPresenceStatusText = "Checking Microsoft CLI connection."
-                refreshUI()
-                updateScheduledMeetingRefreshes()
-                refreshMicrosoftConnectionState(allowCLIStatusCheck: true)
-                return true
-            }
-        } else {
-            refreshMicrosoftConnectionState()
-            guard model.teamsConnectionState.isConnected else {
-                model.teamsPresenceEnabled = false
-                model.teamsPresenceStatusText = "Connect Microsoft before turning on Teams Busy."
-                model.lastError = "Connect Microsoft once before enabling Teams Busy."
-                model.lastErrorRecovery = nil
-                refreshUI()
-                updateScheduledMeetingRefreshes()
-                return false
-            }
+        refreshMicrosoftConnectionState()
+        guard model.teamsConnectionState.isConnected else {
+            model.teamsPresenceEnabled = false
+            model.teamsPresenceStatusText = "Connect Microsoft before turning on Teams Busy."
+            model.lastError = "Connect Microsoft once before enabling Teams Busy."
+            model.lastErrorRecovery = nil
+            refreshUI()
+            updateScheduledMeetingRefreshes()
+            return false
         }
 
         model.teamsPresenceEnabled = true
@@ -1405,17 +1358,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let teamsConnected = model.teamsConnectionState.isConnected
 
         guard teamsConnected else {
-            refreshMicrosoftConnectionState(allowCLIStatusCheck: automationEnabled)
-            if automationEnabled, microsoftCLIClient.isAvailable, !model.teamsSetupConfig.isComplete {
-                model.teamsPresenceStatusText = "Checking Microsoft CLI connection."
-                refreshUI()
-                return
-            }
+            refreshMicrosoftConnectionState()
             switch model.teamsConnectionState {
             case .missingSetup:
-                model.teamsPresenceStatusText = "Off. Microsoft 365 CLI is not available."
+                model.teamsPresenceStatusText = "Off. Install Microsoft 365 CLI for one-time setup."
             case .signedOut:
-                model.teamsPresenceStatusText = "Off. Connect Microsoft with CLI before turning on Teams Busy."
+                model.teamsPresenceStatusText = "Off. Complete Microsoft setup or connect Microsoft."
             case .failed:
                 model.teamsPresenceStatusText = "Microsoft connection check failed."
             case .connected:
@@ -1443,14 +1391,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                     calendarConnected: calendarConnected,
                     teamsConnected: teamsConnected
                 )
-                refreshMicrosoftConnectionState(allowCLIStatusCheck: automationEnabled)
+                refreshMicrosoftConnectionState()
             } catch let error where isExpectedCancellation(error) {
                 AppLog.teamsPresence.debug("Teams presence sync cancelled")
             } catch {
                 model.lastError = userFacingError(error)
                 model.lastErrorRecovery = nil
                 model.teamsPresenceStatusText = "Teams Busy could not be updated."
-                refreshMicrosoftConnectionState(allowCLIStatusCheck: automationEnabled)
+                refreshMicrosoftConnectionState()
             }
             refreshUI()
         }
@@ -1931,13 +1879,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         if case AppError.gmailScopeNotGranted = error {
             return gmailUserFacingError(error)
         }
-        if lowercased.contains("client_secret") || lowercased.contains("invalid_client") {
+        if !lowercased.contains("microsoft"),
+           lowercased.contains("client_secret") || lowercased.contains("invalid_client") {
             return text.s(
                 "Google connection is unavailable in this build.",
                 "이 빌드에서는 Google에 연결할 수 없습니다."
             )
         }
-        if lowercased.contains("redirect_uri_mismatch") || lowercased.contains("url scheme") {
+        if !lowercased.contains("microsoft"),
+           lowercased.contains("redirect_uri_mismatch") || lowercased.contains("url scheme") {
             return text.s(
                 "Google could not return to Lazyest Work. Install the latest build.",
                 "Google이 Lazyest Work로 돌아오지 못했습니다. 최신 빌드를 설치하세요."
@@ -1956,13 +1906,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 "Microsoft 365 CLI 설치에 실패했습니다. Homebrew와 Node.js를 확인한 뒤 다시 시도하세요."
             )
         }
+        if lowercased.contains("microsoft one-time setup could not create") {
+            if lowercased.contains("403") ||
+                lowercased.contains("insufficient privileges") ||
+                lowercased.contains("authorization_requestdenied") {
+                return text.s(
+                    "Your organization does not allow this account to create its personal Microsoft sign-in app.",
+                    "조직에서 이 계정의 개인 Microsoft 로그인 앱 생성을 허용하지 않습니다."
+                )
+            }
+            return text.s(
+                "The Microsoft sign-in app could not be created during one-time setup. Try again.",
+                "Microsoft 1회 설정용 로그인 앱을 만들지 못했습니다. 다시 시도하세요."
+            )
+        }
+        if lowercased.contains("microsoft one-time setup sign-in failed") {
+            return text.s(
+                "Microsoft one-time setup sign-in was denied or did not finish.",
+                "Microsoft 1회 설정 로그인이 거부되었거나 완료되지 않았습니다."
+            )
+        }
         if lowercased.contains("microsoft") || lowercased.contains("graph") || lowercased.contains("teams") ||
             lowercased.contains("presencereadwrite") || lowercased.contains("presence.readwrite") {
             if lowercased.contains("keychain") {
                 return "Teams status could not read or save credentials in Keychain. Try Connect Microsoft again."
             }
+            if lowercased.contains("redirect_uri_mismatch") {
+                return text.s(
+                    "The personal Microsoft sign-in app has an invalid callback. Run Microsoft setup again.",
+                    "개인 Microsoft 로그인 앱의 콜백 설정이 올바르지 않습니다. Microsoft 설정을 다시 진행하세요."
+                )
+            }
+            if lowercased.contains("access_denied") {
+                return text.s(
+                    "Microsoft sign-in was denied. Allow profile and Teams presence access, then try again.",
+                    "Microsoft 로그인이 거부되었습니다. 프로필과 Teams 상태 권한을 허용한 뒤 다시 시도하세요."
+                )
+            }
             if lowercased.contains("aadsts700016") {
-                return "Teams status is not available because this Microsoft app is not allowed in your organization."
+                return text.s(
+                    "Your personal Microsoft sign-in app no longer exists. Click Sign in again to recreate it.",
+                    "개인 Microsoft 로그인 앱이 더 이상 없습니다. 로그인을 다시 눌러 재생성하세요."
+                )
             }
             if lowercased.contains("aadsts65001") || lowercased.contains("admin") || lowercased.contains("consent") {
                 return "Teams status needs permission approval from your Microsoft account or organization."
