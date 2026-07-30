@@ -44,7 +44,9 @@ Local development builds may reuse the publisher ID embedded in an existing `/Ap
 
 ## Microsoft Graph
 
-Teams status is optional. Without a native Microsoft client ID, Lazyest Work uses Microsoft 365 CLI with Microsoft's first-party Microsoft Graph Command Line Tools app ID (`14d82eec-204b-4c2f-b7e8-296a70dab67e`). The installer does not preserve a Microsoft client ID from older app bundles; include `GWS_MICROSOFT_CLIENT_ID` and optionally `GWS_MICROSOFT_TENANT_ID` only when distributing a build with an organization-approved Microsoft Graph client.
+Teams status is optional. An unmanaged installation uses Microsoft 365 CLI once to authenticate through Microsoft's Azure CLI public client and create a single-tenant `Lazyest Work Personal` public client owned by the signed-in user. The creation command registers `http://localhost`, `User.Read`, and `Presence.ReadWrite` and never requests administrator consent. Lazyest Work then uses that generated client directly with OAuth authorization code, PKCE, and a temporary localhost callback. Public client and tenant IDs are stored in app preferences; the refresh credential is stored in Keychain.
+
+The tenant must allow ordinary members to register apps and self-consent to these delegated permissions. This setup does not override tenant policy or Conditional Access. Managed builds may include `GWS_MICROSOFT_CLIENT_ID` and `GWS_MICROSOFT_TENANT_ID` only after that client has the app callback and delegated Graph permissions configured. The installer does not copy stale Microsoft client IDs from older app bundles.
 
 ## Security
 
@@ -52,6 +54,6 @@ Teams status is optional. Without a native Microsoft client ID, Lazyest Work use
 - Calendar uses `calendar.events.readonly` for the primary calendar's upcoming events.
 - Gmail uses `gmail.labels` only for the Inbox unread count and does not send desktop mail alerts.
 - Teams call block uses local macOS Accessibility and event monitoring permissions only when enabled.
-- Teams status uses Microsoft Graph delegated presence access through Microsoft 365 CLI unless the app bundle includes a native Microsoft client ID. It sets user preferred presence and relies on the selected backend's stored connection.
+- Teams status uses a user-owned public client and delegated Microsoft Graph access obtained through browser OAuth with PKCE. It sets user preferred presence and stores its refresh credential in Keychain.
 - Generated Google product icons are ignored by Git.
 - Public GitHub Release builds require Developer ID signing and notarization; local source builds do not.
