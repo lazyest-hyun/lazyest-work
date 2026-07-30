@@ -287,8 +287,13 @@ private struct MicrosoftAuthorizationGrant {
 }
 
 private final class MicrosoftOAuthLoopbackServer: @unchecked Sendable {
-    private static let callbackTimeoutMilliseconds: Int32 = 300_000
+    private static let callbackTimeout: TimeInterval = 300
     private static let maximumRequestBytes = 65_536
+    // A connection that never completes its request line must not stall the
+    // whole sign-in. Reads are bounded so an idle or half-open client is
+    // dropped and the real Microsoft callback still gets accepted.
+    private static let requestReadTimeout: TimeInterval = 10
+    private static let acceptBacklog: Int32 = 8
 
     private let descriptor: Int32
     private let descriptorLock = NSLock()
@@ -324,7 +329,7 @@ private final class MicrosoftOAuthLoopbackServer: @unchecked Sendable {
                 Darwin.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
-        guard bindStatus == 0, Darwin.listen(descriptor, 1) == 0 else {
+        guard bindStatus == 0, Darwin.listen(descriptor, Self.acceptBacklog) == 0 else {
             Darwin.close(descriptor)
             throw AppError.api("Microsoft sign-in could not open a local callback.")
         }
@@ -342,6 +347,10 @@ private final class MicrosoftOAuthLoopbackServer: @unchecked Sendable {
         }
 
         self.descriptor = descriptor
+        // Must stay `localhost`: that is the host the personal app registers,
+        // and Entra ID's any-port allowance for a loopback redirect applies to
+        // the registered host. Switching to 127.0.0.1 would need it registered
+        // too, plus a migration for apps already created.
         redirectURI = "http://localhost:\(UInt16(bigEndian: boundAddress.sin_port))"
     }
 
@@ -370,49 +379,99 @@ private final class MicrosoftOAuthLoopbackServer: @unchecked Sendable {
     private func waitForCallbackSync(expectedState: String) throws -> URL {
         defer { closeListener() }
 
-        var descriptorToPoll = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
-        let pollStatus = Darwin.poll(
-            &descriptorToPoll,
-            1,
-            Self.callbackTimeoutMilliseconds
-        )
-        guard pollStatus > 0, descriptorToPoll.revents & Int16(POLLIN) != 0 else {
-            throw AppError.api(
-                pollStatus == 0
-                    ? "Microsoft sign-in timed out."
-                    : "Microsoft sign-in local callback failed."
-            )
-        }
+        let deadline = Date().addingTimeInterval(Self.callbackTimeout)
 
-        let clientDescriptor = Darwin.accept(descriptor, nil, nil)
-        guard clientDescriptor >= 0 else {
-            throw AppError.api("Microsoft sign-in local callback failed.")
+        while true {
+            let remaining = deadline.timeIntervalSinceNow
+            guard remaining > 0 else {
+                throw AppError.api("Microsoft sign-in timed out.")
+            }
+
+            var descriptorToPoll = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
+            let pollStatus = Darwin.poll(
+                &descriptorToPoll,
+                1,
+                Int32((remaining * 1000).rounded(.up))
+            )
+            if pollStatus < 0, errno == EINTR {
+                continue
+            }
+            guard pollStatus > 0, descriptorToPoll.revents & Int16(POLLIN) != 0 else {
+                throw AppError.api(
+                    pollStatus == 0
+                        ? "Microsoft sign-in timed out."
+                        : "Microsoft sign-in local callback failed."
+                )
+            }
+
+            let clientDescriptor = Darwin.accept(descriptor, nil, nil)
+            guard clientDescriptor >= 0 else {
+                if errno == EINTR || errno == ECONNABORTED {
+                    continue
+                }
+                throw AppError.api("Microsoft sign-in local callback failed.")
+            }
+
+            // Anything else that reaches this port — a local port scanner, a
+            // reloaded tab, a stale request — is answered and ignored. Only a
+            // redirect carrying the state issued for this sign-in ends the wait.
+            if let callbackURL = handleConnection(clientDescriptor, expectedState: expectedState) {
+                return callbackURL
+            }
         }
+    }
+
+    /// Reads one accepted connection and returns the redirect URL only when it
+    /// carries this sign-in's state. Always closes `clientDescriptor`.
+    private func handleConnection(_ clientDescriptor: Int32, expectedState: String) -> URL? {
         defer { Darwin.close(clientDescriptor) }
 
-        var suppressSIGPIPE: Int32 = 1
-        _ = withUnsafePointer(to: &suppressSIGPIPE) {
+        setSocketFlag(clientDescriptor, option: SO_NOSIGPIPE)
+        var readTimeout = timeval(tv_sec: Int(Self.requestReadTimeout), tv_usec: 0)
+        _ = withUnsafePointer(to: &readTimeout) {
             Darwin.setsockopt(
                 clientDescriptor,
                 SOL_SOCKET,
-                SO_NOSIGPIPE,
+                SO_RCVTIMEO,
                 $0,
-                socklen_t(MemoryLayout<Int32>.size)
+                socklen_t(MemoryLayout<timeval>.size)
             )
         }
 
-        let request = try receiveRequest(from: clientDescriptor)
-        let callbackURL = try callbackURL(from: request)
+        guard let request = try? receiveRequest(from: clientDescriptor),
+              let callbackURL = try? callbackURL(from: request) else {
+            return nil
+        }
+
         let queryItems = URLComponents(
             url: callbackURL,
             resolvingAgainstBaseURL: false
         )?.queryItems ?? []
+        guard queryItems.first(where: { $0.name == "state" })?.value == expectedState else {
+            sendResponse(to: clientDescriptor, succeeded: false)
+            return nil
+        }
+
+        // An Entra ID error redirect also carries the state and no code. It is
+        // still this sign-in's answer, so it is returned for the caller to read.
         sendResponse(
             to: clientDescriptor,
-            succeeded: queryItems.contains(where: { $0.name == "code" }) &&
-                queryItems.first(where: { $0.name == "state" })?.value == expectedState
+            succeeded: queryItems.contains { $0.name == "code" }
         )
         return callbackURL
+    }
+
+    private func setSocketFlag(_ descriptor: Int32, option: Int32) {
+        var enabled: Int32 = 1
+        _ = withUnsafePointer(to: &enabled) {
+            Darwin.setsockopt(
+                descriptor,
+                SOL_SOCKET,
+                option,
+                $0,
+                socklen_t(MemoryLayout<Int32>.size)
+            )
+        }
     }
 
     private func receiveRequest(from descriptor: Int32) throws -> String {
