@@ -23,6 +23,7 @@ credentials*.json
 client_secret*.json
 
 # Runtime and editor noise
+.idea/
 .omo/
 .ulw/
 *.log
