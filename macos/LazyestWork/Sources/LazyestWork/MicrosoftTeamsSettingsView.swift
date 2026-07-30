@@ -64,12 +64,12 @@ struct MicrosoftTeamsSettingsCard: View {
 
             Spacer(minLength: 8)
 
-            if operation == .signingIn {
+            if operation == .settingUp {
+                workingLabel(text.s("One-time setup", "1회 설정 중"))
+            } else if operation == .signingIn {
                 workingLabel(text.teamsSigningIn)
             } else if operation == .signingOut {
                 workingLabel(text.teamsSigningOut)
-            } else if operation == .checkingConnection {
-                workingLabel(text.teamsCheckingConnection)
             } else if connectionState.isConnected {
                 Button(text.signOut, action: onSignOut)
                     .buttonStyle(.bordered)
