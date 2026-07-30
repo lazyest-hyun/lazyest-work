@@ -11,6 +11,7 @@ struct MicrosoftTeamsSettingsCard: View {
     @Binding var isPresenceEnabled: Bool
     let onInstallCLI: () -> Void
     let onConnect: () -> Void
+    let onResetSetup: () -> Void
     let onSignOut: () -> Void
     private var text: AppText { AppText(language: language) }
 
@@ -75,10 +76,19 @@ struct MicrosoftTeamsSettingsCard: View {
                     .buttonStyle(.bordered)
                     .controlSize(.small)
             } else {
-                Button(text.signIn, action: onConnect)
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .disabled(!canSignIn || operation.isActive)
+                HStack(spacing: 6) {
+                    if usesNativeAuth {
+                        Button(text.s("Set up again", "다시 설정"), action: onResetSetup)
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .disabled(operation.isActive)
+                    }
+
+                    Button(text.signIn, action: onConnect)
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .disabled(!canSignIn || operation.isActive)
+                }
             }
         }
     }

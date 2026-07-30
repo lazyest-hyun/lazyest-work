@@ -225,9 +225,9 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.3.9</string>
+  <string>0.4.0</string>
   <key>CFBundleVersion</key>
-  <string>12</string>
+  <string>13</string>
 $GOOGLE_PLIST_KEYS
 $MICROSOFT_PLIST_KEYS
 $URL_TYPES_PLIST

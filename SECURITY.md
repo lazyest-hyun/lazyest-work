@@ -26,9 +26,11 @@ without administrator consent. Lazyest Work stores its public client and tenant
 IDs in app preferences. Sign-in then uses OAuth authorization code with PKCE and
 a temporary localhost callback, requests delegated `User.Read` and
 `Presence.ReadWrite` access, and stores the refresh credential in Keychain. No
-Microsoft client secret is created or bundled. The CLI keeps its normal local
-connection cache; Lazyest Work restores any previously active CLI connection
-after setup and does not run global CLI logout.
+Microsoft client secret is created or bundled. The CLI setup process runs with
+an isolated temporary home directory with owner-only permissions. Lazyest Work
+removes that temporary token and connection cache after setup, without reading,
+switching, or deleting connections in the user's normal Microsoft 365 CLI
+cache.
 
 Do not commit:
 

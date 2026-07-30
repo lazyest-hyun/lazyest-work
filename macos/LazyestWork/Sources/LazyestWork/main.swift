@@ -478,6 +478,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 onApproveMeetingFocus: { [weak self] in self?.requestMeetingFocusApproval() },
                 onInstallMicrosoftCLI: { [weak self] in self?.installMicrosoft365CLI() },
                 onConnectMicrosoftTeams: { [weak self] in self?.connectMicrosoftTeams() },
+                onResetMicrosoftTeamsSetup: { [weak self] in self?.resetMicrosoftTeamsSetup() },
                 onSignOutMicrosoftTeams: { [weak self] in self?.signOutMicrosoftTeams() },
                 onUpdateTeamsPresence: { [weak self] isEnabled in self?.updateTeamsPresenceEnabled(isEnabled) ?? false },
                 onUpdateTeamsCallBlock: { [weak self] isEnabled in self?.updateTeamsCallBlockEnabled(isEnabled) ?? false },
@@ -1159,7 +1160,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             do {
                 try? await teamsPresenceService.clearManagedPresenceIfNeeded()
                 try await microsoftAuthClient.signIn(config: model.teamsSetupConfig)
-                teamsPresenceService.clearLocalManagedState()
+                await teamsPresenceService.reconcileManagedStateWithCurrentAccount()
                 refreshMicrosoftConnectionState()
                 model.teamsPresenceStatusText = "Connected. Turn on Teams Busy for accepted meetings."
                 syncTeamsPresence()
@@ -1204,7 +1205,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 refreshUI()
 
                 try await microsoftAuthClient.signIn(config: model.teamsSetupConfig)
-                teamsPresenceService.clearLocalManagedState()
+                await teamsPresenceService.reconcileManagedStateWithCurrentAccount()
                 refreshMicrosoftConnectionState()
                 model.teamsPresenceStatusText = "Connected. Turn on Teams Busy for accepted meetings."
                 syncTeamsPresence()
@@ -1217,6 +1218,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             model.teamsOperation = .idle
             refreshUI()
         }
+    }
+
+    private func resetMicrosoftTeamsSetup() {
+        guard model.teamsOperation == .idle else { return }
+
+        var credentialClearError: Error?
+        do {
+            try microsoftAuthClient.signOut()
+        } catch {
+            credentialClearError = error
+        }
+
+        MicrosoftSetupSettings.clearPersonalApp()
+        model.teamsSetupConfig = MicrosoftSetupSettings.load()
+        microsoftAuthClient.configure(model.teamsSetupConfig)
+        refreshMicrosoftConnectionState()
+        model.lastError = credentialClearError.map(userFacingError)
+        model.lastErrorRecovery = nil
+        model.teamsPresenceStatusText = microsoftCLIClient.isAvailable
+            ? "Microsoft setup was reset. Press Sign in to set it up again."
+            : "Microsoft setup was reset. Install Microsoft 365 CLI to set it up again."
+        refreshUI()
     }
 
     /// A Busy this app set can outlive the connection that set it — upgrading
@@ -2158,6 +2181,7 @@ struct LazyestWorkPopover: View {
     let onApproveMeetingFocus: () -> Void
     let onInstallMicrosoftCLI: () -> Void
     let onConnectMicrosoftTeams: () -> Void
+    let onResetMicrosoftTeamsSetup: () -> Void
     let onSignOutMicrosoftTeams: () -> Void
     let onUpdateTeamsPresence: (Bool) -> Bool
     let onUpdateTeamsCallBlock: (Bool) -> Bool
@@ -2220,6 +2244,7 @@ struct LazyestWorkPopover: View {
                     onApproveMeetingFocus: onApproveMeetingFocus,
                     onInstallMicrosoftCLI: onInstallMicrosoftCLI,
                     onConnectMicrosoftTeams: onConnectMicrosoftTeams,
+                    onResetMicrosoftTeamsSetup: onResetMicrosoftTeamsSetup,
                     onSignOutMicrosoftTeams: onSignOutMicrosoftTeams,
                     onUpdateTeamsPresence: onUpdateTeamsPresence,
                     onUpdateTeamsCallBlock: onUpdateTeamsCallBlock,
@@ -3531,6 +3556,7 @@ struct AppSettingsView: View {
     let onApproveMeetingFocus: () -> Void
     let onInstallMicrosoftCLI: () -> Void
     let onConnectMicrosoftTeams: () -> Void
+    let onResetMicrosoftTeamsSetup: () -> Void
     let onSignOutMicrosoftTeams: () -> Void
     let onUpdateTeamsPresence: (Bool) -> Bool
     let onUpdateTeamsCallBlock: (Bool) -> Bool
@@ -3585,6 +3611,7 @@ struct AppSettingsView: View {
         onApproveMeetingFocus: @escaping () -> Void,
         onInstallMicrosoftCLI: @escaping () -> Void,
         onConnectMicrosoftTeams: @escaping () -> Void,
+        onResetMicrosoftTeamsSetup: @escaping () -> Void,
         onSignOutMicrosoftTeams: @escaping () -> Void,
         onUpdateTeamsPresence: @escaping (Bool) -> Bool,
         onUpdateTeamsCallBlock: @escaping (Bool) -> Bool,
@@ -3638,6 +3665,7 @@ struct AppSettingsView: View {
         self.onApproveMeetingFocus = onApproveMeetingFocus
         self.onInstallMicrosoftCLI = onInstallMicrosoftCLI
         self.onConnectMicrosoftTeams = onConnectMicrosoftTeams
+        self.onResetMicrosoftTeamsSetup = onResetMicrosoftTeamsSetup
         self.onSignOutMicrosoftTeams = onSignOutMicrosoftTeams
         self.onUpdateTeamsPresence = onUpdateTeamsPresence
         self.onUpdateTeamsCallBlock = onUpdateTeamsCallBlock
@@ -3762,6 +3790,7 @@ struct AppSettingsView: View {
                             isPresenceEnabled: teamsPresenceBinding,
                             onInstallCLI: onInstallMicrosoftCLI,
                             onConnect: onConnectMicrosoftTeams,
+                            onResetSetup: onResetMicrosoftTeamsSetup,
                             onSignOut: onSignOutMicrosoftTeams
                         )
                     case .account:

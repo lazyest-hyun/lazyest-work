@@ -357,12 +357,9 @@ private final class MicrosoftOAuthLoopbackServer: @unchecked Sendable {
         }
 
         self.descriptor = descriptor
-        // RFC 8252 §7.3: advertise the loopback literal, not `localhost`. The
-        // socket only binds 127.0.0.1, so a machine whose `localhost` resolves
-        // to ::1 first would otherwise never deliver the callback. Microsoft
-        // Entra ID treats a registered `http://localhost` redirect URI as
-        // covering 127.0.0.1 on any port.
-        redirectURI = "http://127.0.0.1:\(UInt16(bigEndian: boundAddress.sin_port))"
+        // The app registration contains `http://localhost`; Entra ID requires
+        // the runtime redirect host to match that registered URI.
+        redirectURI = "http://localhost:\(UInt16(bigEndian: boundAddress.sin_port))"
     }
 
     deinit {
@@ -930,13 +927,12 @@ final class MicrosoftGraphAuthClient: NSObject, ASWebAuthenticationPresentationC
         _ tokenSet: MicrosoftTokenSet,
         config: MicrosoftSetupConfig
     ) -> Bool {
-        // Tokens saved before the client and tenant were recorded carry
-        // neither value. Reading that as a mismatch signs the user out on
-        // upgrade even though the stored credential still works. A credential
-        // that really is stale now fails at refresh and is discarded there.
+        // A token without its issuing client and tenant cannot be proven to
+        // belong to the active setup. Require both values rather than accepting
+        // an unbound credential after configuration or tenant changes.
         guard let tokenClientID = tokenSet.clientID,
               let tokenTenantID = tokenSet.tenantID else {
-            return true
+            return false
         }
         return tokenClientID.caseInsensitiveCompare(config.clientID) == .orderedSame &&
             tokenTenantID.caseInsensitiveCompare(config.tenantID) == .orderedSame
@@ -1108,6 +1104,24 @@ final class MicrosoftTeamsPresenceService {
         let defaults = UserDefaults.standard
         clearManagedState(defaults)
         clearPausedEvent(defaults)
+    }
+
+    /// A saved managed session belongs to the Microsoft directory user that
+    /// created it. Keep it when reconnecting the same account so a failed clear
+    /// can retry, but never carry it into another account or an identity we
+    /// cannot verify.
+    func reconcileManagedStateWithCurrentAccount() async {
+        let defaults = UserDefaults.standard
+        guard let session = loadManagedSession(defaults) else {
+            return
+        }
+
+        guard let currentUserID = try? await authClient.graphUserID(),
+              currentUserID.caseInsensitiveCompare(session.userID) == .orderedSame else {
+            clearManagedState(defaults)
+            clearPausedEvent(defaults)
+            return
+        }
     }
 
     private func setBusyIfNeeded(
