@@ -81,13 +81,15 @@ If Do Not Disturb was already on before a meeting starts, Lazyest Work leaves it
 Lazyest Work can set your Teams preferred presence to `Busy / Busy` during accepted Google Calendar meetings.
 
 1. Open **Settings -> Teams status**.
-2. Install **Microsoft 365 CLI** once if the settings card asks for it.
+2. Install **Microsoft 365 CLI** if the settings card asks for it. Keep it installed: Lazyest Work needs it again if the personal client is ever removed and has to be re-created.
 3. Click **Sign in**. The first sign-in uses Microsoft 365 CLI and the browser to create a single-tenant `Lazyest Work Personal` public client owned by your work account.
 4. Sign in again to that personal client and allow profile and Teams presence access. Lazyest Work stores the refresh credential in Keychain.
 
-The one-time setup authenticates the real Microsoft 365 CLI through Microsoft's Azure CLI public client, then creates the personal app without requesting administrator consent. The personal app registers only `User.Read` and `Presence.ReadWrite`; Lazyest Work requests those delegated permissions plus offline refresh access with PKCE and a temporary localhost callback. The generated client and tenant IDs are stored in app preferences, and the refresh credential is stored in Keychain.
+The one-time setup authenticates the real Microsoft 365 CLI through Microsoft's Azure CLI public client, then creates the personal app without requesting administrator consent. The personal app registers only `User.Read` and `Presence.ReadWrite`; Lazyest Work requests those delegated permissions plus offline refresh access with PKCE and a temporary `localhost` callback. The generated client and tenant IDs are stored in app preferences, and the refresh credential is stored in Keychain. Setup runs the CLI against a private temporary home that is deleted afterwards, so the broad Azure CLI token it needs never reaches the CLI's own token cache and your existing CLI connections are left untouched.
 
-This works for ordinary organization members only when their tenant allows users to register apps and self-consent to these delegated permissions. It does not bypass tenant or Conditional Access policy. A managed build can instead set `GWS_MICROSOFT_CLIENT_ID` and `GWS_MICROSOFT_TENANT_ID` after the organization configures that client and its callback.
+This works for ordinary organization members only when their tenant allows users to register apps and self-consent to these delegated permissions. It does not bypass tenant or Conditional Access policy. It also depends on Microsoft continuing to pre-authorize its Azure CLI public client on Microsoft Graph; if that changes, setup will start asking for administrator consent. A managed build can instead set `GWS_MICROSOFT_CLIENT_ID` and `GWS_MICROSOFT_TENANT_ID` after the organization configures that client and its callback, which skips setup entirely and needs neither Node.js nor the CLI.
+
+If the personal client is later deleted from Entra ID, sign-in cannot report that directly — Entra ID renders its own error page instead of returning to the callback, so Lazyest Work only sees a timeout. When there is no working connection left to lose, a failed sign-in therefore releases the stored client so that pressing **Sign in** again runs setup, which reuses the existing registration when it is still there. A connected account keeps its stored credential; if that credential is itself dead, it is discarded the next time it fails to refresh.
 
 The settings card shows whether Lazyest Work set Teams preferred status to Busy, kept an existing Lazyest Work Busy value, cleared it, or is waiting for an active accepted meeting. Teams can take a few minutes to show a successful Microsoft Graph presence update.
 
