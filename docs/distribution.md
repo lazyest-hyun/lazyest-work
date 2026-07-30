@@ -34,11 +34,21 @@ For the GitHub Release artifact, store notarization credentials once with `notar
 ```bash
 GWS_GOOGLE_CLIENT_ID="<publisher-client-id>" \
 GWS_CODESIGN_IDENTITY="Developer ID Application: ... (<apple-team-id>)" \
+GWS_INSTALLER_IDENTITY="Developer ID Installer: ... (<apple-team-id>)" \
 GWS_NOTARY_PROFILE="lazyest-work-notary" \
 scripts/package-macos-release.sh
 ```
 
-The packaging script signs with the hardened runtime, submits the ZIP to Apple, staples the accepted ticket to the app, validates it with Gatekeeper, and then recreates the final release ZIP. `Apple Distribution` certificates are intentionally rejected because they are for App Store workflows, not direct GitHub distribution.
+`GWS_INSTALLER_IDENTITY` is required and must belong to the same Apple Team as
+`GWS_CODESIGN_IDENTITY`; the script exits before building without it.
+
+The packaging script signs the app with the hardened runtime and notarizes it as
+a ZIP, then builds the installer package, notarizes and staples that, checks it
+with the Installer Gatekeeper assessment, and writes a `.sha256` beside it. The
+release artifact is `dist/LazyestWork-<version>-macOS.pkg` — the ZIP only exists
+to get the app notarized, and README points users at the PKG.
+`Apple Distribution` certificates are intentionally rejected because they are
+for App Store workflows, not direct GitHub distribution.
 
 Local development builds may reuse the publisher ID embedded in an existing `/Applications/Lazyest Work.app`. Distribution artifacts still require an explicit publisher ID at packaging time.
 
