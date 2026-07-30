@@ -405,14 +405,18 @@ final class Microsoft365CLIClient: @unchecked Sendable {
                 "--authType", "browser",
                 "--appId", Self.graphCommandLineToolsAppID,
                 "--tenant", Self.tenant,
-                "-o", "none"
+                // `-o none` also silences the CLI's error text, which leaves a
+                // failed sign-in with an empty stderr and no way to show why
+                // Microsoft Entra ID refused. `-o text` prints nothing on
+                // success and the real error on failure.
+                "-o", "text"
             ],
             timeout: 300
         )
     }
 
     func signOut() async throws {
-        _ = try await run(["logout", "-o", "none"], timeout: 60)
+        _ = try await run(["logout", "-o", "text"], timeout: 60)
     }
 
     func profile() async throws -> MicrosoftProfile {
@@ -442,7 +446,7 @@ final class Microsoft365CLIClient: @unchecked Sendable {
                 "--url", "https://graph.microsoft.com/v1.0/users/\(userID.pathSegmentEncoded)/presence/setUserPreferredPresence",
                 "--body", bodyText,
                 "--content-type", "application/json",
-                "-o", "none"
+                "-o", "text"
             ],
             timeout: 60
         )
@@ -454,7 +458,7 @@ final class Microsoft365CLIClient: @unchecked Sendable {
                 "request",
                 "--method", "post",
                 "--url", "https://graph.microsoft.com/v1.0/users/\(userID.pathSegmentEncoded)/presence/clearUserPreferredPresence",
-                "-o", "none"
+                "-o", "text"
             ],
             timeout: 60
         )
