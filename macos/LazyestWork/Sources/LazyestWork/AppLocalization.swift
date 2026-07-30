@@ -78,7 +78,7 @@ struct AppText {
     var teamsStatus: String { s("Teams status", "Teams 상태") }
     var teamsCLIName: String { "Microsoft 365 CLI" }
     var teamsCLIInstalled: String { s("Ready", "사용 가능") }
-    var teamsCLIRequired: String { s("Required for Teams status automation", "Teams 상태 자동화에 필요") }
+    var teamsCLIRequired: String { s("Required once for Microsoft setup", "Microsoft 1회 설정에 필요") }
     var teamsInstallingCLI: String { s("Installing…", "설치 중…") }
     var teamsMicrosoftAccount: String { s("Microsoft account", "Microsoft 계정") }
     var teamsSignedOut: String { s("Not signed in", "로그인 안 됨") }
