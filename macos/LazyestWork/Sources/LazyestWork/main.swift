@@ -1154,6 +1154,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         model.teamsPresenceStatusText = "Opening Microsoft sign-in."
         refreshUI()
 
+        let wasConnected = model.teamsConnectionState.isConnected
         Task {
             do {
                 try? await teamsPresenceService.clearManagedPresenceIfNeeded()
@@ -1166,10 +1167,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 model.lastError = userFacingError(error)
                 model.lastErrorRecovery = nil
                 model.teamsPresenceStatusText = "Microsoft sign-in did not finish."
-                if model.teamsSetupConfig.usesLoopbackRedirect,
-                   error.localizedDescription.localizedCaseInsensitiveContains("aadsts700016") {
+                // When the personal app registration is gone, Entra ID renders
+                // its own error page and never redirects, so the loopback
+                // listener only ever sees a timeout and cannot name the cause.
+                // Releasing the stored registration is what lets the next
+                // attempt run setup again, but it is only safe when there is no
+                // working credential to lose — otherwise cancelling a re-auth
+                // would throw away a session that still works. The stored
+                // credential is left alone here; a genuinely dead one is
+                // discarded when its refresh fails.
+                if model.teamsSetupConfig.usesLoopbackRedirect, !wasConnected {
                     MicrosoftSetupSettings.clearPersonalApp()
-                    try? microsoftAuthClient.signOut()
+                    model.teamsPresenceStatusText =
+                        "Microsoft sign-in did not finish. Press Sign in to run setup again."
                 }
                 refreshMicrosoftConnectionState()
             }
@@ -1210,7 +1220,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             } catch {
                 model.lastError = userFacingError(error)
                 model.lastErrorRecovery = nil
-                model.teamsPresenceStatusText = "Microsoft setup did not finish."
+                model.teamsPresenceStatusText =
+                    "Microsoft setup did not finish. Press Sign in to run setup again."
+                // The registration is saved before the browser sign-in, so a
+                // failure here would otherwise leave a stored app that this
+                // path can no longer re-create. Setup only runs when nothing is
+                // stored yet, so releasing it cannot cost a working session,
+                // and the next attempt reuses the registration just created.
+                MicrosoftSetupSettings.clearPersonalApp()
                 refreshMicrosoftConnectionState()
             }
             model.teamsOperation = .idle
