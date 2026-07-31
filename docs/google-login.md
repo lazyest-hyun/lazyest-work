@@ -3,14 +3,24 @@
 ## User flow
 
 1. Open Lazyest Work.
-2. Click **Connect Google**.
+2. Click **Sign in with Google**.
 3. Allow Calendar events and the Gmail unread count.
 
 Users do not create a Google Cloud project, install a CLI, paste a Client ID, or provide a client secret. Google Sign-In stores the session in Keychain and restores it after reboot.
 
 Fresh installs enable the Gmail unread badge by default so Calendar and Gmail can be approved in the same Google flow. If Gmail permission is declined, Calendar remains connected and the Gmail badge turns off.
 
-When upgrading from an old locally signed build, the previous `auth` item can be restricted to that exact development certificate. If the item is still readable, Lazyest Work preserves it. If it is unreadable, clicking **Connect Google** removes only that stale session before starting the normal Google flow, allowing the Developer ID app to save a durable replacement tied to its stable signing requirement.
+The publisher enables the Calendar and Gmail APIs and configures the OAuth
+consent screen before signing a release. After clicking **Sign in with
+Google**, users only select an account and approve the scopes requested by the
+app; they do not open Google Cloud Console.
+
+The current unverified publication may show Google's unverified-app warning.
+Users who are permitted by the project's audience and their Workspace
+organization can continue through that warning and grant access. Verification
+is not an additional end-user setup step.
+
+When upgrading from an old locally signed build, the previous `auth` item can be restricted to that exact development certificate. If the item is still readable, Lazyest Work preserves it. If it is unreadable, clicking **Sign in with Google** removes only that stale session before starting the normal Google flow, allowing the Developer ID app to save a durable replacement tied to its stable signing requirement.
 
 ## Scopes
 

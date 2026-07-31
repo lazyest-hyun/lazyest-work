@@ -5,16 +5,35 @@
 Public users install one signed and notarized app bundle. The publisher Google OAuth Client ID and callback scheme are embedded at build time, so the app's first-run flow is only:
 
 ```text
-Connect Google -> Allow -> Done
+Sign in with Google -> Allow -> Done
 ```
 
 Users never edit the app bundle or configure Google Cloud.
+
+Google product icon PNGs are not app resources. The release enables the
+Settings -> General installer by default, which downloads icons only into the
+current user's Application Support directory. To disable that action for a
+specific build, use:
+
+```bash
+GWS_GOOGLE_PRODUCT_ICON_DOWNLOADS=0
+```
+
+Neutral SF Symbols remain the fallback when the user has not installed the
+icons or a download fails.
+
+The app version and build number come from the repository-root `VERSION` and
+`BUILD_NUMBER` files. Increment both deliberately before a public build; the
+same values are embedded in Info.plist and shown in Settings -> General.
 
 ## Publisher Google configuration
 
 - Enable Google Calendar API and Gmail API in the publisher project.
 - Create the Google Apple-native OAuth client for the release bundle identifier, `com.lazyest.work`.
-- Configure the external OAuth consent screen and complete the brand/data-access verification shown by Google Cloud for `calendar.events.readonly`.
+- Configure the external audience and declare the requested scopes on the OAuth
+  consent screen. The current unverified publication can be used with Google's
+  warning and applicable user limits; Google verification is the later step
+  for removing that warning and supporting broader public distribution.
 - `gmail.labels` is a [non-sensitive Gmail scope](https://developers.google.com/workspace/gmail/api/auth/scopes), so this design does not require a restricted Gmail scope or its third-party security assessment.
 - Do not create or bundle a Web client secret.
 
@@ -33,6 +52,7 @@ For the GitHub Release artifact, store notarization credentials once with `notar
 
 ```bash
 GWS_GOOGLE_CLIENT_ID="<publisher-client-id>" \
+GWS_GOOGLE_PRODUCT_ICON_DOWNLOADS=1 \
 GWS_CODESIGN_IDENTITY="Developer ID Application: ... (<apple-team-id>)" \
 GWS_INSTALLER_IDENTITY="Developer ID Installer: ... (<apple-team-id>)" \
 GWS_NOTARY_PROFILE="lazyest-work-notary" \

@@ -21,23 +21,16 @@ Install the signed and notarized PKG from
 [GitHub Releases](https://github.com/lazyest-hyun/lazyest-work/releases/latest).
 The installer places Lazyest Work in `/Applications`.
 
-Lazyest Work uses the dedicated `com.lazyest.work` bundle identifier. The first install after migrating from GWS Menu needs fresh macOS permissions and a new Google sign-in. Fresh source builds also need publisher Google OAuth configuration before Google sign-in is available.
+Lazyest Work uses the dedicated `com.lazyest.work` bundle identifier. The first install after migrating from GWS Menu needs fresh macOS permissions and a new Google sign-in.
 
-For local development:
-
-```bash
-git clone https://github.com/lazyest-hyun/lazyest-work.git
-cd lazyest-work
-GWS_GOOGLE_CLIENT_ID="<publisher-client-id>" \
-  swift scripts/sync-google-app-icons.swift --accept-google-brand-terms
-```
-
-This builds, installs to `/Applications/Lazyest Work.app`, and opens the app. A Google native-app Client ID is public configuration, not a secret; the app never bundles a client secret.
+Release users never run a CLI or enter an OAuth Client ID. The publisher embeds
+the app's public Google OAuth configuration before signing; the app never
+bundles a client secret.
 
 ## Connect Google
 
 1. Open Lazyest Work.
-2. Click **Connect Google**.
+2. Click **Sign in with Google**.
 3. Allow Calendar events and the Gmail unread count.
 
 That is the complete user setup. The session is restored from Keychain after reboot.
@@ -59,10 +52,16 @@ Open Settings from the gear button in Lazyest Work. Changes save automatically.
 - **Calendar & Mail**: meeting alerts, Do Not Disturb, and the Gmail unread badge.
 - **Teams call block**: require confirmation before supported Teams outgoing call buttons and block Control-scroll zoom inside Teams.
 - **Teams status**: optional Microsoft Graph integration through browser sign-in.
-- **General**: enable Open at login or open the GitHub repository.
+- **General**: choose System, Light, or Dark appearance, enable Open at login,
+  and see the installed app version and build number. Dark is the default even
+  when macOS uses Light.
 - **Account**: connect or sign out of Google.
 
-To customize Workspace shortcuts, click the sliders button next to the **Workspace** label on the main menu. The editor uses the same grid layout as the menu.
+To customize Workspace shortcuts, click the sliders button next to the
+**Workspace** label on the main menu. The editor uses the same grid layout as
+the menu. Google product icon downloads are managed separately under
+**Settings -> General**; downloaded icons stay in Application Support and are
+not bundled into the app.
 
 ### Do Not Disturb During Meetings
 
@@ -107,12 +106,7 @@ Lazyest Work blocks only Teams elements whose accessibility role and label ident
 
 ## Updating
 
-Public builds update from the signed and notarized PKG in GitHub Releases. Open the PKG and click **Continue**, then **Install**; the Installer places Lazyest Work in `/Applications`. Source builds can update manually:
-
-```bash
-git pull
-swift scripts/sync-google-app-icons.swift --accept-google-brand-terms
-```
+Public builds update from the signed and notarized PKG in GitHub Releases. Open the PKG and click **Continue**, then **Install**; the Installer places Lazyest Work in `/Applications`.
 
 The installer closes any running `LazyestWork` process, replaces `/Applications/Lazyest Work.app`, removes an older `~/Applications/Lazyest Work.app` copy when present, and opens the new version.
 
@@ -130,6 +124,17 @@ scripts/package-macos-release.sh
 
 The command creates `dist/LazyestWork-<version>-macOS.pkg` and its SHA-256 file. It does not create a GitHub tag or Release.
 
+Google product icon PNGs are never bundled in the app. Release builds allow
+**Settings -> General -> Google product icons -> Install** to download official
+icon files into the current user's Application Support cache. Set
+`GWS_GOOGLE_PRODUCT_ICON_DOWNLOADS=0` only when a build must disable that
+download; neutral SF Symbols remain the fallback.
+
+Release versioning is sourced from `VERSION` and `BUILD_NUMBER`. Increment
+`VERSION` for the public app version and increment `BUILD_NUMBER` for every
+distributed build. The installed values appear in **Settings -> General ->
+Version**.
+
 ## Privacy and Permissions
 
 - Calendar access uses `https://www.googleapis.com/auth/calendar.events.readonly`.
@@ -142,7 +147,9 @@ The command creates `dist/LazyestWork-<version>-macOS.pkg` and its SHA-256 file.
 - Lazyest Work does not turn off a Do Not Disturb state that was already active before it touched it.
 - Google auth is handled by Google Sign-In and Keychain.
 - Microsoft auth uses OAuth authorization code with PKCE. Refresh credentials are stored in Keychain, and Lazyest Work gets the Graph user ID from `/me`.
-- Google product icons are downloaded locally and ignored by Git.
+- Google product icons are not included in the app bundle. The Workspace
+  settings action downloads them to Application Support; otherwise the app
+  uses neutral SF Symbols.
 
 ## Troubleshooting
 
@@ -160,8 +167,11 @@ The command creates `dist/LazyestWork-<version>-macOS.pkg` and its SHA-256 file.
 - **Need icons only**:
 
 ```bash
-swift scripts/sync-google-app-icons.swift --accept-google-brand-terms --no-install
+swift scripts/sync-google-app-icons.swift --accept-google-brand-terms
 ```
+
+This command only refreshes `~/Library/Application Support/Lazyest
+Work/WorkspaceIcons`. It does not build, install, or modify the app.
 
 ## Development Checks
 
@@ -175,3 +185,12 @@ swift build --package-path macos/LazyestWork
 scripts/test-lazyest-work-core.sh
 bash -n scripts/package-macos-release.sh
 ```
+
+For a source-only development install, the developer supplies the
+publisher-owned public OAuth configuration to the build script:
+
+```bash
+GWS_GOOGLE_CLIENT_ID="<publisher-client-id>" scripts/install-macos-app.sh
+```
+
+End users do not use this command.

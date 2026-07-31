@@ -255,7 +255,7 @@ enum MicrosoftTeamsOperation: Equatable {
     var isActive: Bool { self != .idle }
 }
 
-struct MicrosoftTokenSet: Codable, Equatable {
+struct MicrosoftTokenSet: Codable, Equatable, Sendable {
     var accessToken: String
     var refreshToken: String
     var expiresAt: Date
@@ -578,7 +578,7 @@ private final class MicrosoftOAuthLoopbackServer: @unchecked Sendable {
     }
 }
 
-final class MicrosoftTokenStore {
+actor MicrosoftTokenStore {
     private let service = "com.lazyest.work.microsoft-graph"
     private let account = "tokens"
 
@@ -664,11 +664,11 @@ final class MicrosoftGraphAuthClient: NSObject, ASWebAuthenticationPresentationC
         self.config = config
     }
 
-    func connectionState() -> MicrosoftConnectionState {
+    func connectionState() async -> MicrosoftConnectionState {
         guard let normalized = try? config.normalized() else {
             return .missingSetup
         }
-        guard let tokenSet = try? tokenStore.load(),
+        guard let tokenSet = try? await tokenStore.load(),
               tokenMatchesConfiguration(tokenSet, config: normalized) else {
             return .signedOut
         }
@@ -688,12 +688,12 @@ final class MicrosoftGraphAuthClient: NSObject, ASWebAuthenticationPresentationC
         tokenSet.userID = profile.id
         tokenSet.clientID = normalized.clientID
         tokenSet.tenantID = normalized.tenantID
-        try tokenStore.save(tokenSet)
+        try await tokenStore.save(tokenSet)
     }
 
     func accessToken() async throws -> String {
         let normalized = try config.normalized()
-        guard var tokenSet = try tokenStore.load(),
+        guard var tokenSet = try await tokenStore.load(),
               tokenMatchesConfiguration(tokenSet, config: normalized) else {
             throw AppError.microsoftNotSignedIn
         }
@@ -707,16 +707,16 @@ final class MicrosoftGraphAuthClient: NSObject, ASWebAuthenticationPresentationC
             // The stored credential is dead. Dropping it moves the account to
             // signed out so the user is asked to reconnect, instead of leaving
             // a connection that reads as live and fails on every use.
-            try? tokenStore.clear()
+            try? await tokenStore.clear()
             throw AppError.microsoftNotSignedIn
         }
-        try tokenStore.save(tokenSet)
+        try await tokenStore.save(tokenSet)
         return tokenSet.accessToken
     }
 
     func graphUserID() async throws -> String {
         let normalized = try config.normalized()
-        guard var tokenSet = try tokenStore.load(),
+        guard var tokenSet = try await tokenStore.load(),
               tokenMatchesConfiguration(tokenSet, config: normalized) else {
             throw AppError.microsoftNotSignedIn
         }
@@ -728,12 +728,12 @@ final class MicrosoftGraphAuthClient: NSObject, ASWebAuthenticationPresentationC
         let profile = try await fetchProfile(accessToken: accessToken)
         tokenSet.userID = profile.id
         tokenSet.accountName = profile.userPrincipalName ?? profile.displayName ?? tokenSet.accountName
-        try tokenStore.save(tokenSet)
+        try await tokenStore.save(tokenSet)
         return profile.id
     }
 
-    func signOut() throws {
-        try tokenStore.clear()
+    func signOut() async throws {
+        try await tokenStore.clear()
     }
 
     func handle(url: URL) -> Bool {

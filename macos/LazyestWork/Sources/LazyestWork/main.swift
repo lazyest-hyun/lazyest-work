@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import Foundation
+import ImageIO
 #if GWS_FILE_KEYCHAIN
 import GTMAppAuth
 #endif
@@ -18,6 +19,11 @@ final class AppModel: ObservableObject {
     @Published var language: AppLanguage {
         didSet {
             AppLanguageSettings.save(language)
+        }
+    }
+    @Published var appearance: AppAppearance {
+        didSet {
+            AppAppearanceSettings.save(appearance)
         }
     }
     @Published var events: [MeetingEvent] = []
@@ -83,6 +89,7 @@ final class AppModel: ObservableObject {
 
     init() {
         language = AppLanguageSettings.load()
+        appearance = AppAppearanceSettings.load()
         alertLeadMinutes = AlertSettings.loadLeadMinutes()
         calendarNotificationsEnabled = AlertSettings.loadCalendarNotificationsEnabled()
         meetingFocusEnabled = FocusSettings.loadMeetingFocusEnabled()
@@ -305,6 +312,7 @@ enum AppImages {
         image.isTemplate = false
         return image
     }
+
 }
 
 private enum PopoverLayout {
@@ -450,7 +458,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let popover = NSPopover()
         let maximumHeight = maximumPopoverHeight()
         popover.behavior = .transient
-        popover.animates = true
+        // Animated closing leaves `isShown` true until AppKit finishes the
+        // transition. A rapid second click then requests another close instead
+        // of reopening the popover, which makes the status item feel frozen.
+        popover.animates = false
         popover.contentSize = NSSize(
             width: PopoverLayout.width,
             height: min(maximumHeight, PopoverLayout.minimumHomeHeight)
@@ -470,6 +481,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 onEnableGmailBadge: { [weak self] in self?.enableGmailBadgeFromMenu() },
                 onEnableLaunchAtLogin: { [weak self] in self?.enableLaunchAtLoginFromMenu() },
                 onUpdateLanguage: { [weak self] language in self?.updateLanguage(language) },
+                onUpdateAppearance: { [weak self] appearance in self?.updateAppearance(appearance) },
                 onUpdateWorkspaceApps: { [weak self] apps in self?.updateWorkspaceApps(apps) },
                 onUpdateAlertLeadMinutes: { [weak self] minutes in self?.updateAlertLeadMinutes(minutes) },
                 onUpdateCalendarNotifications: { [weak self] isEnabled in self?.updateCalendarNotificationsEnabled(isEnabled) },
@@ -517,23 +529,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     private func configureApplicationMenu() {
+        let text = AppText(language: model.language)
         let mainMenu = NSMenu()
 
         let appMenuItem = NSMenuItem()
         mainMenu.addItem(appMenuItem)
         let appMenu = NSMenu(title: "Lazyest Work")
-        appMenu.addItem(NSMenuItem(title: "Quit Lazyest Work", action: #selector(quit), keyEquivalent: "q"))
+        appMenu.addItem(NSMenuItem(
+            title: text.s("Quit Lazyest Work", "Lazyest Work 종료"),
+            action: #selector(quit),
+            keyEquivalent: "q"
+        ))
         appMenuItem.submenu = appMenu
 
         let editMenuItem = NSMenuItem()
         mainMenu.addItem(editMenuItem)
-        let editMenu = NSMenu(title: "Edit")
-        editMenu.addItem(NSMenuItem(title: "Undo", action: Selector(("undo:")), keyEquivalent: "z"))
+        let editMenu = NSMenu(title: text.s("Edit", "편집"))
+        editMenu.addItem(NSMenuItem(
+            title: text.s("Undo", "실행 취소"),
+            action: Selector(("undo:")),
+            keyEquivalent: "z"
+        ))
         editMenu.addItem(NSMenuItem.separator())
-        editMenu.addItem(NSMenuItem(title: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x"))
-        editMenu.addItem(NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c"))
-        editMenu.addItem(NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v"))
-        editMenu.addItem(NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"))
+        editMenu.addItem(NSMenuItem(
+            title: text.s("Cut", "잘라내기"),
+            action: #selector(NSText.cut(_:)),
+            keyEquivalent: "x"
+        ))
+        editMenu.addItem(NSMenuItem(
+            title: text.s("Copy", "복사"),
+            action: #selector(NSText.copy(_:)),
+            keyEquivalent: "c"
+        ))
+        editMenu.addItem(NSMenuItem(
+            title: text.s("Paste", "붙여넣기"),
+            action: #selector(NSText.paste(_:)),
+            keyEquivalent: "v"
+        ))
+        editMenu.addItem(NSMenuItem(
+            title: text.s("Select All", "모두 선택"),
+            action: #selector(NSText.selectAll(_:)),
+            keyEquivalent: "a"
+        ))
         editMenuItem.submenu = editMenu
 
         NSApp.mainMenu = mainMenu
@@ -595,7 +632,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private func restoreAndRefresh(skipGoogleRestore: Bool = false) async {
         refreshLaunchAtLoginState()
         refreshMeetingFocusHelperStatus()
-        refreshMicrosoftConnectionState()
+        await refreshMicrosoftConnectionState()
         if skipGoogleRestore {
             model.connectionState = authClient.connectionState()
             refreshUI()
@@ -913,6 +950,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private func updateLanguage(_ language: AppLanguage) {
         guard model.language != language else { return }
         model.language = language
+        configureApplicationMenu()
         if !model.meetingFocusStatusText.isEmpty {
             model.meetingFocusStatusText = text.dndPausedSubtitle
         }
@@ -921,6 +959,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             model.teamsPresenceStatusText = text.teamsManualPause
         }
         refreshTeamsCallBlockPermissions()
+        refreshUI()
+    }
+
+    private func updateAppearance(_ appearance: AppAppearance) {
+        guard model.appearance != appearance else { return }
+        model.appearance = appearance
         refreshUI()
     }
 
@@ -1082,11 +1126,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         model.meetingFocusApprovalPending = false
     }
 
-    private func refreshMicrosoftConnectionState() {
+    private func refreshMicrosoftConnectionState() async {
         model.teamsSetupConfig = MicrosoftSetupSettings.load()
         microsoftAuthClient.configure(model.teamsSetupConfig)
         if model.teamsSetupConfig.isComplete {
-            model.teamsConnectionState = microsoftAuthClient.connectionState()
+            model.teamsConnectionState = await microsoftAuthClient.connectionState()
         } else {
             model.teamsConnectionState = microsoftCLIClient.isAvailable ? .signedOut : .missingSetup
         }
@@ -1161,7 +1205,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 try? await teamsPresenceService.clearManagedPresenceIfNeeded()
                 try await microsoftAuthClient.signIn(config: model.teamsSetupConfig)
                 await teamsPresenceService.reconcileManagedStateWithCurrentAccount()
-                refreshMicrosoftConnectionState()
+                await refreshMicrosoftConnectionState()
                 model.teamsPresenceStatusText = "Connected. Turn on Teams Busy for accepted meetings."
                 syncTeamsPresence()
             } catch {
@@ -1171,9 +1215,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 if model.teamsSetupConfig.usesLoopbackRedirect,
                    error.localizedDescription.localizedCaseInsensitiveContains("aadsts700016") {
                     MicrosoftSetupSettings.clearPersonalApp()
-                    try? microsoftAuthClient.signOut()
+                    try? await microsoftAuthClient.signOut()
                 }
-                refreshMicrosoftConnectionState()
+                await refreshMicrosoftConnectionState()
             }
             model.teamsOperation = .idle
             refreshUI()
@@ -1206,14 +1250,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
                 try await microsoftAuthClient.signIn(config: model.teamsSetupConfig)
                 await teamsPresenceService.reconcileManagedStateWithCurrentAccount()
-                refreshMicrosoftConnectionState()
+                await refreshMicrosoftConnectionState()
                 model.teamsPresenceStatusText = "Connected. Turn on Teams Busy for accepted meetings."
                 syncTeamsPresence()
             } catch {
                 model.lastError = userFacingError(error)
                 model.lastErrorRecovery = nil
                 model.teamsPresenceStatusText = "Microsoft setup did not finish."
-                refreshMicrosoftConnectionState()
+                await refreshMicrosoftConnectionState()
             }
             model.teamsOperation = .idle
             refreshUI()
@@ -1222,24 +1266,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     private func resetMicrosoftTeamsSetup() {
         guard model.teamsOperation == .idle else { return }
+        model.teamsOperation = .signingOut
+        Task {
+            var credentialClearError: Error?
+            do {
+                try await microsoftAuthClient.signOut()
+            } catch {
+                credentialClearError = error
+            }
 
-        var credentialClearError: Error?
-        do {
-            try microsoftAuthClient.signOut()
-        } catch {
-            credentialClearError = error
+            MicrosoftSetupSettings.clearPersonalApp()
+            model.teamsSetupConfig = MicrosoftSetupSettings.load()
+            microsoftAuthClient.configure(model.teamsSetupConfig)
+            await refreshMicrosoftConnectionState()
+            model.lastError = credentialClearError.map(userFacingError)
+            model.lastErrorRecovery = nil
+            model.teamsPresenceStatusText = microsoftCLIClient.isAvailable
+                ? "Microsoft setup was reset. Press Sign in to set it up again."
+                : "Microsoft setup was reset. Install Microsoft 365 CLI to set it up again."
+            model.teamsOperation = .idle
+            refreshUI()
         }
-
-        MicrosoftSetupSettings.clearPersonalApp()
-        model.teamsSetupConfig = MicrosoftSetupSettings.load()
-        microsoftAuthClient.configure(model.teamsSetupConfig)
-        refreshMicrosoftConnectionState()
-        model.lastError = credentialClearError.map(userFacingError)
-        model.lastErrorRecovery = nil
-        model.teamsPresenceStatusText = microsoftCLIClient.isAvailable
-            ? "Microsoft setup was reset. Press Sign in to set it up again."
-            : "Microsoft setup was reset. Install Microsoft 365 CLI to set it up again."
-        refreshUI()
     }
 
     /// A Busy this app set can outlive the connection that set it — upgrading
@@ -1286,11 +1333,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             // nothing can find it again. Keep it so a later attempt retries.
             let canForgetManagedSession = presenceClearError == nil
             do {
-                try microsoftAuthClient.signOut()
+                try await microsoftAuthClient.signOut()
                 if canForgetManagedSession {
                     teamsPresenceService.clearLocalManagedState()
                 }
-                refreshMicrosoftConnectionState()
+                await refreshMicrosoftConnectionState()
                 model.lastError = presenceClearError.map(userFacingError)
                 model.lastErrorRecovery = nil
                 model.teamsPresenceStatusText = presenceClearError == nil
@@ -1334,7 +1381,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             return false
         }
 
-        refreshMicrosoftConnectionState()
         guard model.teamsConnectionState.isConnected else {
             model.teamsPresenceEnabled = false
             model.teamsPresenceStatusText = "Connect Microsoft before turning on Teams Busy."
@@ -1414,7 +1460,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let teamsConnected = model.teamsConnectionState.isConnected
 
         guard teamsConnected else {
-            refreshMicrosoftConnectionState()
             switch model.teamsConnectionState {
             case .missingSetup:
                 model.teamsPresenceStatusText = "Off. Install Microsoft 365 CLI for one-time setup."
@@ -1448,14 +1493,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                     calendarConnected: calendarConnected,
                     teamsConnected: teamsConnected
                 )
-                refreshMicrosoftConnectionState()
             } catch let error where isExpectedCancellation(error) {
                 AppLog.teamsPresence.debug("Teams presence sync cancelled")
             } catch {
                 model.lastError = userFacingError(error)
                 model.lastErrorRecovery = nil
                 model.teamsPresenceStatusText = "Teams Busy could not be updated."
-                refreshMicrosoftConnectionState()
+                await refreshMicrosoftConnectionState()
             }
             refreshUI()
         }
@@ -1886,9 +1930,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private func showPopover() {
         guard let button = statusItem.button else { return }
         updateNow()
-        refreshLaunchAtLoginState()
         refreshMeetingFocusHelperStatus()
-        refreshMicrosoftConnectionState()
         refreshTeamsCallBlockPermissions()
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         popover.contentViewController?.view.window?.makeKey()
@@ -1896,8 +1938,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     private func showStatusMenu(anchor: NSStatusBarButton) {
+        let text = AppText(language: model.language)
         let menu = NSMenu()
-        let quit = NSMenuItem(title: "Quit Lazyest Work", action: #selector(quit), keyEquivalent: "q")
+        let quit = NSMenuItem(
+            title: text.s("Quit Lazyest Work", "Lazyest Work 종료"),
+            action: #selector(quit),
+            keyEquivalent: "q"
+        )
         quit.target = self
         menu.addItem(quit)
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.bounds.minY), in: anchor)
@@ -2147,6 +2194,41 @@ enum PopoverScreen {
     case workspaceSettings
 }
 
+extension AppAppearance {
+    var colorScheme: ColorScheme? {
+        switch self {
+        case .system:
+            return nil
+        case .light:
+            return .light
+        case .dark:
+            return .dark
+        }
+    }
+}
+
+enum AppVersionInfo {
+    static var display: String {
+        let version = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleShortVersionString"
+        ) as? String
+        let build = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleVersion"
+        ) as? String
+
+        switch (version?.nilIfBlank, build?.nilIfBlank) {
+        case let (version?, build?):
+            return "\(version) (\(build))"
+        case let (version?, nil):
+            return version
+        case let (nil, build?):
+            return build
+        case (nil, nil):
+            return "—"
+        }
+    }
+}
+
 private struct HomeContentHeightPreferenceKey: PreferenceKey {
     static let defaultValue: CGFloat = 0
 
@@ -2173,6 +2255,7 @@ struct LazyestWorkPopover: View {
     let onEnableGmailBadge: () -> Void
     let onEnableLaunchAtLogin: () -> Void
     let onUpdateLanguage: (AppLanguage) -> Void
+    let onUpdateAppearance: (AppAppearance) -> Void
     let onUpdateWorkspaceApps: ([WorkspaceApp]) -> Void
     let onUpdateAlertLeadMinutes: (Int) -> Void
     let onUpdateCalendarNotifications: (Bool) -> Void
@@ -2210,6 +2293,8 @@ struct LazyestWorkPopover: View {
                     currentCalendarNotificationsEnabled: model.calendarNotificationsEnabled,
                     initialLanguage: model.language,
                     currentLanguage: model.language,
+                    initialAppearance: model.appearance,
+                    currentAppearance: model.appearance,
                     initialMeetingFocusEnabled: model.meetingFocusEnabled,
                     currentMeetingFocusEnabled: model.meetingFocusEnabled,
                     meetingFocusApprovalPending: model.meetingFocusApprovalPending,
@@ -2237,6 +2322,7 @@ struct LazyestWorkPopover: View {
                     onOpenNotificationSettings: openNotificationSettings,
                     onOpenGitHub: openGitHub,
                     onUpdateLanguage: onUpdateLanguage,
+                    onUpdateAppearance: onUpdateAppearance,
                     onUpdateAlertLeadMinutes: onUpdateAlertLeadMinutes,
                     onUpdateCalendarNotifications: onUpdateCalendarNotifications,
                     onSendTestCalendarNotification: onSendTestCalendarNotification,
@@ -2257,6 +2343,7 @@ struct LazyestWorkPopover: View {
             case .workspaceSettings:
                 WorkspaceAppsEditor(
                     initialApps: model.workspaceApps,
+                    language: model.language,
                     onDone: showHome,
                     onUpdateApps: onUpdateWorkspaceApps
                 )
@@ -2266,6 +2353,7 @@ struct LazyestWorkPopover: View {
         .frame(width: PopoverLayout.width)
         .frame(maxHeight: .infinity, alignment: .top)
         .popoverSurface()
+        .preferredColorScheme(model.appearance.colorScheme)
         .onAppear {
             onPreferredHeightChange(preferredHeight)
         }
@@ -2310,34 +2398,6 @@ struct LazyestWorkPopover: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    if !model.connectionState.isConnected {
-                        VStack(alignment: .leading, spacing: 14) {
-                            if let lastError = presentedLastError ?? presentedGmailError {
-                                let recovery = presentedLastError == nil
-                                    ? model.gmailErrorRecovery
-                                    : model.lastErrorRecovery
-                                ErrorBanner(
-                                    message: lastError,
-                                    actionTitle: recovery?.buttonTitle,
-                                    action: recovery.map { recovery in
-                                        { recoverFromError(recovery) }
-                                    }
-                                )
-                            }
-
-                            PrimaryCalendarCard(
-                                connectionState: model.connectionState,
-                                language: model.language,
-                                isBusy: model.isBusy,
-                                includesGmail: model.mailBadgeEnabled,
-                                onSignIn: onSignIn
-                            )
-                        }
-                        .padding(16)
-
-                        MenuDivider()
-                    }
-
                     WorkspaceGrid(
                         apps: model.workspaceApps.filter(\.isEnabled),
                         language: model.language,
@@ -2354,8 +2414,17 @@ struct LazyestWorkPopover: View {
                     MenuDivider()
 
                     VStack(alignment: .leading, spacing: 14) {
-                        if model.connectionState.isConnected,
-                           let lastError = presentedLastError ?? presentedGmailError {
+                        if !model.connectionState.isConnected {
+                            PrimaryCalendarCard(
+                                connectionState: model.connectionState,
+                                language: model.language,
+                                isBusy: model.isBusy,
+                                includesGmail: model.mailBadgeEnabled,
+                                onSignIn: onSignIn
+                            )
+                        }
+
+                        if let lastError = presentedLastError ?? presentedGmailError {
                             let recovery = presentedLastError == nil
                                 ? model.gmailErrorRecovery
                                 : model.lastErrorRecovery
@@ -2381,6 +2450,7 @@ struct LazyestWorkPopover: View {
                         if shouldShowSetupChecklist {
                             FinishSetupCard(
                                 isGoogleConnected: model.connectionState.isConnected,
+                                language: model.language,
                                 alertLeadMinutes: model.alertLeadMinutes,
                                 calendarNotificationsEnabled: model.calendarNotificationsEnabled,
                                 mailBadgeEnabled: model.mailBadgeEnabled,
@@ -2669,13 +2739,13 @@ struct PrimaryCalendarCard: View {
         case .signedOut:
             AuthStatusCard(
                 symbolName: "person.crop.circle.badge.plus",
-                title: text.s("Connect Google", "Google 연결"),
+                title: text.s("Sign in with Google", "Google 로그인"),
                 message: isBusy
                     ? text.s("Waiting for Google.", "Google 로그인 대기 중…")
                     : includesGmail
                         ? text.s("Calendar events and Gmail unread count.", "캘린더 일정과 Gmail 안 읽은 개수를 확인합니다.")
                         : text.s("Calendar events for the next 7 days.", "앞으로 7일의 캘린더 일정을 확인합니다."),
-                primaryTitle: isBusy ? text.s("Connecting", "연결 중…") : text.s("Connect", "연결"),
+                primaryTitle: isBusy ? text.s("Signing in", "로그인 중…") : text.s("Sign in with Google", "Google로 로그인"),
                 primarySystemImage: "person.crop.circle.badge.plus",
                 primaryAction: onSignIn,
                 isPrimaryDisabled: isBusy,
@@ -2744,6 +2814,7 @@ struct AuthStatusCard: View {
 
 struct FinishSetupCard: View {
     let isGoogleConnected: Bool
+    let language: AppLanguage
     let alertLeadMinutes: Int
     let calendarNotificationsEnabled: Bool
     let mailBadgeEnabled: Bool
@@ -2756,6 +2827,7 @@ struct FinishSetupCard: View {
     let onEnableTeamsCallBlock: () -> Void
     let onEnableLaunchAtLogin: () -> Void
     let onDismiss: () -> Void
+    private var text: AppText { AppText(language: language) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -2766,51 +2838,74 @@ struct FinishSetupCard: View {
                     .frame(width: 22)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Finish setup")
+                    Text(text.s("Finish setup", "설정 마무리"))
                         .font(.system(size: 14, weight: .semibold))
-                    Text("Optional settings that make the menu app feel alive.")
+                    Text(text.s(
+                        "Optional settings that make the menu app feel alive.",
+                        "메뉴 앱을 더 편리하게 쓰기 위한 선택 설정입니다."
+                    ))
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
 
                 Spacer()
 
-                IconButton(symbolName: "xmark", title: "Hide setup checklist", action: onDismiss)
+                IconButton(
+                    symbolName: "xmark",
+                    title: text.s("Hide setup checklist", "설정 안내 숨기기"),
+                    action: onDismiss
+                )
             }
 
             VStack(spacing: 7) {
                 FinishSetupOptionRow(
-                    title: "Teams call block",
+                    title: text.s("Teams call block", "Teams 통화 차단"),
                     subtitle: teamsCallBlockPermissionPending
-                        ? "Waiting for macOS permission. Open Settings to finish approval."
-                        : "Ask before outgoing Teams call buttons. Microsoft sign-in is not needed.",
+                        ? text.s(
+                            "Waiting for macOS permission. Open Settings to finish approval.",
+                            "macOS 권한을 기다리는 중입니다. 시스템 설정에서 승인을 마치세요."
+                        )
+                        : text.s(
+                            "Ask before outgoing Teams call buttons. Microsoft sign-in is not needed.",
+                            "Teams 통화 버튼 실행 전에 확인합니다. Microsoft 로그인은 필요하지 않습니다."
+                        ),
                     systemImage: "phone.badge.checkmark",
+                    language: language,
                     isEnabled: teamsCallBlockEnabled,
                     isPending: teamsCallBlockPermissionPending,
                     isBusy: false,
                     action: onEnableTeamsCallBlock
                 )
                 FinishSetupOptionRow(
-                    title: "Open at login",
-                    subtitle: "Start Lazyest Work when you sign in to macOS.",
+                    title: text.openAtLogin,
+                    subtitle: text.openAtLoginSubtitle,
                     systemImage: "power",
+                    language: language,
                     isEnabled: launchAtLoginEnabled,
                     isBusy: false,
                     action: onEnableLaunchAtLogin
                 )
                 if isGoogleConnected {
                     FinishSetupOptionRow(
-                        title: "Meeting alerts",
-                        subtitle: "Desktop notification \(alertLeadMinutes)m before meetings. Requires macOS Notifications.",
+                        title: text.s("Meeting alerts", "회의 알림"),
+                        subtitle: text.s(
+                            "Desktop notification \(alertLeadMinutes)m before meetings. Requires macOS Notifications.",
+                            "회의 \(alertLeadMinutes)분 전에 데스크톱 알림을 보냅니다. macOS 알림 권한이 필요합니다."
+                        ),
                         systemImage: "bell.badge",
+                        language: language,
                         isEnabled: calendarNotificationsEnabled,
                         isBusy: isBusy,
                         action: onEnableCalendarAlerts
                     )
                     FinishSetupOptionRow(
-                        title: "Gmail badge",
-                        subtitle: "Inbox unread count. Rechecks briefly after opening Gmail.",
+                        title: text.s("Gmail badge", "Gmail 배지"),
+                        subtitle: text.s(
+                            "Inbox unread count. Rechecks briefly after opening Gmail.",
+                            "받은편지함 안 읽은 개수를 표시하고 Gmail을 연 뒤 잠시 재확인합니다."
+                        ),
                         systemImage: "envelope.badge",
+                        language: language,
                         isEnabled: mailBadgeEnabled,
                         isBusy: isBusy,
                         action: onEnableGmailBadge
@@ -2827,10 +2922,12 @@ struct FinishSetupOptionRow: View {
     let title: String
     let subtitle: String
     let systemImage: String
+    let language: AppLanguage
     let isEnabled: Bool
     var isPending = false
     let isBusy: Bool
     let action: () -> Void
+    private var text: AppText { AppText(language: language) }
 
     var body: some View {
         HStack(spacing: 9) {
@@ -2851,15 +2948,15 @@ struct FinishSetupOptionRow: View {
             Spacer(minLength: 8)
 
             if isEnabled {
-                Label("On", systemImage: "checkmark.circle.fill")
+                Label(text.s("On", "켜짐"), systemImage: "checkmark.circle.fill")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.green)
             } else if isPending {
-                Label("Waiting", systemImage: "hourglass")
+                Label(text.s("Waiting", "대기 중"), systemImage: "hourglass")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.orange)
             } else {
-                Button("Enable", action: action)
+                Button(text.s("Enable", "켜기"), action: action)
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                     .disabled(isBusy)
@@ -2948,6 +3045,45 @@ struct LanguagePickerRow: View {
             Picker("", selection: $selection) {
                 ForEach(AppLanguage.allCases) { language in
                     Text(language.displayName).tag(language)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .frame(width: 116)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .menuSurface()
+    }
+}
+
+struct AppearancePickerRow: View {
+    let title: String
+    let subtitle: String
+    let language: AppLanguage
+    @Binding var selection: AppAppearance
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "circle.lefthalf.filled")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 22)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 13, weight: .medium))
+                Text(subtitle)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            Spacer(minLength: 8)
+
+            Picker("", selection: $selection) {
+                ForEach(AppAppearance.allCases) { appearance in
+                    Text(appearance.displayName(language: language)).tag(appearance)
                 }
             }
             .labelsHidden()
@@ -3076,6 +3212,153 @@ struct SettingsActionRow: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
         .menuSurface()
+    }
+}
+
+struct SettingsInfoRow: View {
+    let title: String
+    let subtitle: String
+    let value: String
+    let systemImage: String
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: systemImage)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 22)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 13, weight: .medium))
+                Text(subtitle)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            Spacer(minLength: 8)
+
+            Text(value)
+                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .textSelection(.enabled)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .menuSurface()
+    }
+}
+
+private struct WorkspaceIconDownloadSettingsRow: View {
+    let language: AppLanguage
+    let state: WorkspaceIconInstallState
+    let isDownloadEnabled: Bool
+    let action: () -> Void
+    private var text: AppText { AppText(language: language) }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            GoogleBrandIcon()
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(text.s("Google Workspace app icons", "Google Workspace 앱 아이콘"))
+                    .font(.system(size: 13, weight: .medium))
+                Text(subtitle)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            Spacer(minLength: 8)
+
+            Button(buttonTitle, action: action)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(!isDownloadEnabled || state == .installing)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .menuSurface()
+    }
+
+    private var subtitle: String {
+        guard isDownloadEnabled else {
+            return text.s(
+                "Icon downloads are disabled in this build.",
+                "이 빌드에서는 아이콘 다운로드를 사용할 수 없습니다."
+            )
+        }
+        switch state {
+        case .idle:
+            return text.s(
+                "Download official product icons to this Mac.",
+                "공식 제품 아이콘을 이 Mac에 다운로드합니다."
+            )
+        case .installing:
+            return text.s("Downloading icons…", "아이콘 다운로드 중…")
+        case .installed(let count):
+            return text.s(
+                "\(count) product icons are installed on this Mac.",
+                "이 Mac에 제품 아이콘 \(count)개가 설치되어 있습니다."
+            )
+        case .failed:
+            return text.s(
+                "Some icons could not be downloaded. Try again.",
+                "일부 아이콘을 다운로드하지 못했습니다. 다시 시도하세요."
+            )
+        }
+    }
+
+    private var buttonTitle: String {
+        switch state {
+        case .installing:
+            return text.s("Downloading…", "받는 중…")
+        case .installed:
+            return text.s("Download again", "다시 받기")
+        case .idle, .failed:
+            return text.install
+        }
+    }
+}
+
+private struct GoogleBrandIcon: View {
+    private static let image: NSImage? = {
+        let bundleName = "GoogleSignIn_GoogleSignIn.bundle"
+        let bundleURLs = [
+            Bundle.main.resourceURL?.appendingPathComponent(bundleName, isDirectory: true),
+            Bundle.main.bundleURL
+                .deletingLastPathComponent()
+                .appendingPathComponent(bundleName, isDirectory: true)
+        ]
+
+        for bundleURL in bundleURLs.compactMap({ $0 }) {
+            guard let bundle = Bundle(url: bundleURL) else { continue }
+            let imageURL = bundle.url(forResource: "google@3x", withExtension: "png")
+                ?? bundle.url(forResource: "google", withExtension: "png")
+            if let imageURL,
+               let image = NSImage(contentsOf: imageURL) {
+                image.isTemplate = false
+                return image
+            }
+        }
+        return nil
+    }()
+
+    var body: some View {
+        Group {
+            if let image = Self.image {
+                Image(nsImage: image)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+            } else {
+                Text("G")
+                    .font(.system(size: 16, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Color(red: 0.26, green: 0.52, blue: 0.96))
+            }
+        }
+        .frame(width: 20, height: 20)
+        .accessibilityLabel("Google")
     }
 }
 
@@ -3439,7 +3722,7 @@ struct WorkspaceGrid: View {
                                 }
                             }
                             .frame(width: 36, height: 26)
-                            Text(app.title)
+                            Text(app.displayTitle(language: language))
                                 .font(.system(size: 11, weight: .medium))
                                 .lineLimit(1)
                         }
@@ -3491,6 +3774,262 @@ struct WorkspaceProductIcon: View {
     }
 }
 
+actor WorkspaceIconDownloadStore {
+    static let shared = WorkspaceIconDownloadStore()
+
+    private var downloads: [String: Task<Data?, Never>] = [:]
+
+    static func cachedInstallStatus() -> (downloaded: Int, total: Int) {
+        let downloaded = installableIconNames.reduce(into: 0) { count, iconName in
+            if cachedData(named: iconName) != nil {
+                count += 1
+            }
+        }
+        return (downloaded, installableIconNames.count)
+    }
+
+    func installAll() async -> (downloaded: Int, total: Int) {
+        let launcherIcons = await downloadLauncherIcons()
+        for (iconName, data) in launcherIcons {
+            try? Self.writeCache(data, named: iconName)
+        }
+
+        for iconName in Self.standaloneSourceURLs.keys {
+            if await data(named: iconName, forceRefresh: true) != nil {
+                continue
+            }
+        }
+
+        return Self.cachedInstallStatus()
+    }
+
+    func data(named iconName: String, forceRefresh: Bool = false) async -> Data? {
+        if !forceRefresh, let cachedData = Self.cachedData(named: iconName) {
+            return cachedData
+        }
+        guard let sourceURL = Self.standaloneSourceURLs[iconName] else {
+            return nil
+        }
+        if let download = downloads[iconName] {
+            return await download.value
+        }
+
+        let download = Task<Data?, Never> {
+            var request = URLRequest(
+                url: sourceURL,
+                cachePolicy: .reloadRevalidatingCacheData,
+                timeoutInterval: 15
+            )
+            request.setValue("LazyestWork/1.0", forHTTPHeaderField: "User-Agent")
+
+            do {
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard let response = response as? HTTPURLResponse,
+                      (200..<300).contains(response.statusCode),
+                      data.count <= 2_000_000,
+                      NSImage(data: data) != nil else {
+                    return nil
+                }
+                try Self.writeCache(data, named: iconName)
+                return data
+            } catch {
+                AppLog.lifecycle.debug("Workspace icon download failed for \(iconName, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                return nil
+            }
+        }
+        downloads[iconName] = download
+        let data = await download.value
+        downloads[iconName] = nil
+        return data
+    }
+
+    private func downloadLauncherIcons() async -> [String: Data] {
+        do {
+            let (htmlData, htmlResponse) = try await URLSession.shared.data(from: Self.launcherWidgetURL)
+            guard let htmlResponse = htmlResponse as? HTTPURLResponse,
+                  (200..<300).contains(htmlResponse.statusCode),
+                  let html = String(data: htmlData, encoding: .utf8),
+                  let spriteURL = Self.launcherSpriteURL(from: html) else {
+                return [:]
+            }
+
+            let offsets = Self.launcherOffsets(from: html)
+            let (spriteData, spriteResponse) = try await URLSession.shared.data(from: spriteURL)
+            guard let spriteResponse = spriteResponse as? HTTPURLResponse,
+                  (200..<300).contains(spriteResponse.statusCode),
+                  spriteData.count <= 10_000_000,
+                  let source = CGImageSourceCreateWithData(spriteData as CFData, nil),
+                  let sprite = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+                return [:]
+            }
+
+            let scale = 2
+            let iconSize = 53 * scale
+            var icons: [String: Data] = [:]
+            for (iconName, pid) in Self.launcherPIDs {
+                guard let yOffset = offsets[pid],
+                      let icon = sprite.cropping(to: CGRect(
+                          x: 0,
+                          y: abs(yOffset) * scale,
+                          width: iconSize,
+                          height: iconSize
+                      )),
+                      let pngData = NSBitmapImageRep(cgImage: icon).representation(
+                          using: .png,
+                          properties: [:]
+                      ) else {
+                    continue
+                }
+                icons[iconName] = pngData
+            }
+            return icons
+        } catch {
+            AppLog.lifecycle.debug("Google app launcher icon download failed: \(error.localizedDescription, privacy: .public)")
+            return [:]
+        }
+    }
+
+    static func cachedURL(named iconName: String) -> URL? {
+        guard cacheableIconNames.contains(iconName),
+              let applicationSupportURL = FileManager.default.urls(
+                  for: .applicationSupportDirectory,
+                  in: .userDomainMask
+              ).first else {
+            return nil
+        }
+        return applicationSupportURL
+            .appendingPathComponent("Lazyest Work", isDirectory: true)
+            .appendingPathComponent("WorkspaceIcons", isDirectory: true)
+            .appendingPathComponent("\(iconName).png")
+    }
+
+    private static func cachedData(named iconName: String) -> Data? {
+        guard let url = cachedURL(named: iconName) else {
+            return nil
+        }
+        return try? Data(contentsOf: url, options: .mappedIfSafe)
+    }
+
+    private static func writeCache(_ data: Data, named iconName: String) throws {
+        guard let destinationURL = cachedURL(named: iconName) else {
+            return
+        }
+        try FileManager.default.createDirectory(
+            at: destinationURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try data.write(to: destinationURL, options: .atomic)
+    }
+
+    private static func launcherSpriteURL(from html: String) -> URL? {
+        let patterns = [
+            #"https:\\/\\/ssl\.gstatic\.com\\/gb\\/images\\/sprites\\/p_2x_[^"\\]+\.png"#,
+            #"https://ssl\.gstatic\.com/gb/images/sprites/p_2x_[^"'<>\s]+\.png"#,
+            #"//ssl\.gstatic\.com/gb/images/sprites/p_2x_[^"'<>\s]+\.png"#
+        ]
+        for pattern in patterns {
+            guard let rawValue = firstRegexMatch(in: html, pattern: pattern) else {
+                continue
+            }
+            var value = rawValue
+                .replacingOccurrences(of: #"\/"#, with: "/")
+                .replacingOccurrences(of: #"\\u003d"#, with: "=")
+                .replacingOccurrences(of: #"\\u0026"#, with: "&")
+                .replacingOccurrences(of: #"\u003d"#, with: "=")
+                .replacingOccurrences(of: #"\u0026"#, with: "&")
+            if value.hasPrefix("//") {
+                value = "https:" + value
+            }
+            if let url = URL(string: value) {
+                return url
+            }
+        }
+        return nil
+    }
+
+    private static func launcherOffsets(from html: String) -> [Int: Int] {
+        let pattern = #"\[(\d+),"(?:[^"\\]|\\.)*","0 (-?\d+)px""#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return [:]
+        }
+        let range = NSRange(html.startIndex..<html.endIndex, in: html)
+        return regex.matches(in: html, range: range).reduce(into: [:]) { offsets, match in
+            guard match.numberOfRanges == 3,
+                  let pidRange = Range(match.range(at: 1), in: html),
+                  let offsetRange = Range(match.range(at: 2), in: html),
+                  let pid = Int(html[pidRange]),
+                  let yOffset = Int(html[offsetRange]) else {
+                return
+            }
+            offsets[pid] = yOffset
+        }
+    }
+
+    private static func firstRegexMatch(in string: String, pattern: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return nil
+        }
+        let range = NSRange(string.startIndex..<string.endIndex, in: string)
+        guard let match = regex.firstMatch(in: string, range: range),
+              let matchRange = Range(match.range, in: string) else {
+            return nil
+        }
+        return String(string[matchRange])
+    }
+
+    private static let launcherWidgetURL = URL(
+        string: "https://ogs.google.com/widget/app/so?eom=1&awwd=1&em=2&origin=https%3A%2F%2Fwww.google.com&cn=app&pid=1&spid=1&hl=en"
+    )!
+
+    private static let launcherPIDs: [String: Int] = [
+        "account": 192,
+        "search": 1,
+        "maps": 8,
+        "youtube": 36,
+        "news": 426,
+        "gmail": 23,
+        "meet": 411,
+        "chat": 385,
+        "contacts": 53,
+        "drive": 49,
+        "calendar": 24,
+        "translate": 51,
+        "photos": 31,
+        "finance": 27,
+        "docs": 25,
+        "sheets": 283,
+        "slides": 281,
+        "keep": 136,
+        "ads": 304,
+        "forms": 330,
+        "analytics": 44
+    ]
+
+    private static let standaloneSourceURLs: [String: URL] = [
+        "admin": URL(string: "https://www.gstatic.com/images/branding/product/2x/admin_48dp.png")!,
+        "groups": URL(string: "https://www.gstatic.com/images/branding/product/2x/groups_48dp.png")!,
+        "apps-script": URL(string: "https://www.gstatic.com/images/branding/product/2x/apps_script_48dp.png")!,
+        "cloud-search": URL(string: "https://www.gstatic.com/images/branding/product/2x/cloud_search_48dp.png")!,
+        "vault": URL(string: "https://www.gstatic.com/images/branding/product/2x/vault_48dp.png")!,
+        "cloud-console": URL(string: "https://www.gstatic.com/images/branding/product/2x/google_cloud_48dp.png")!,
+        "gemini": URL(string: "https://www.gstatic.com/images/branding/product/2x/gemini_48dp.png")!,
+        "notebooklm": URL(string: "https://www.gstatic.com/images/branding/product/2x/notebooklm_48dp.png")!,
+        "colab": URL(string: "https://colab.research.google.com/img/colab_favicon_256px.png")!,
+        "search-console": URL(string: "https://www.gstatic.com/images/branding/product/2x/search_console_48dp.png")!,
+        "tag-manager": URL(string: "https://www.gstatic.com/images/branding/product/2x/google_tag_manager_48dp.png")!,
+        "sites": URL(string: "https://www.gstatic.com/images/branding/product/2x/sites_48dp.png")!,
+        "tasks": URL(string: "https://www.gstatic.com/images/branding/product/2x/tasks_48dp.png")!,
+        "voice": URL(string: "https://www.gstatic.com/images/branding/product/2x/voice_48dp.png")!,
+        "classroom": URL(string: "https://www.gstatic.com/images/branding/product/2x/classroom_48dp.png")!
+    ]
+
+    private static let installableIconNames = Set(launcherPIDs.keys)
+        .union(standaloneSourceURLs.keys)
+        .sorted()
+
+    private static let cacheableIconNames = Set(installableIconNames)
+}
+
 private enum AppSettingsSection: String, CaseIterable, Identifiable {
     case general
     case notifications
@@ -3517,6 +4056,7 @@ struct AppSettingsView: View {
     let gmailErrorMessage: String?
     let gmailErrorRecovery: ErrorRecoveryAction?
     let currentLanguage: AppLanguage
+    let currentAppearance: AppAppearance
     let currentCalendarNotificationsEnabled: Bool
     let currentMeetingFocusEnabled: Bool
     let meetingFocusApprovalPending: Bool
@@ -3535,12 +4075,14 @@ struct AppSettingsView: View {
     @State private var draftAlertLeadMinutes: Int
     @State private var draftCalendarNotificationsEnabled: Bool
     @State private var draftLanguage: AppLanguage
+    @State private var draftAppearance: AppAppearance
     @State private var draftMeetingFocusEnabled: Bool
     @State private var draftTeamsPresenceEnabled: Bool
     @State private var draftTeamsCallBlockEnabled: Bool
     @State private var draftTeamsControlScrollBlockEnabled: Bool
     @State private var draftMailBadgeEnabled: Bool
     @State private var draftLaunchAtLoginEnabled: Bool
+    @State private var iconInstallState: WorkspaceIconInstallState
     @State private var selectedSection = AppSettingsSection.general
     let onDone: () -> Void
     let onRecoverError: (ErrorRecoveryAction) -> Void
@@ -3549,6 +4091,7 @@ struct AppSettingsView: View {
     let onOpenNotificationSettings: () -> Void
     let onOpenGitHub: () -> Void
     let onUpdateLanguage: (AppLanguage) -> Void
+    let onUpdateAppearance: (AppAppearance) -> Void
     let onUpdateAlertLeadMinutes: (Int) -> Void
     let onUpdateCalendarNotifications: (Bool) -> Void
     let onSendTestCalendarNotification: () -> Void
@@ -3577,6 +4120,8 @@ struct AppSettingsView: View {
         currentCalendarNotificationsEnabled: Bool,
         initialLanguage: AppLanguage,
         currentLanguage: AppLanguage,
+        initialAppearance: AppAppearance,
+        currentAppearance: AppAppearance,
         initialMeetingFocusEnabled: Bool,
         currentMeetingFocusEnabled: Bool,
         meetingFocusApprovalPending: Bool,
@@ -3604,6 +4149,7 @@ struct AppSettingsView: View {
         onOpenNotificationSettings: @escaping () -> Void,
         onOpenGitHub: @escaping () -> Void,
         onUpdateLanguage: @escaping (AppLanguage) -> Void,
+        onUpdateAppearance: @escaping (AppAppearance) -> Void,
         onUpdateAlertLeadMinutes: @escaping (Int) -> Void,
         onUpdateCalendarNotifications: @escaping (Bool) -> Void,
         onSendTestCalendarNotification: @escaping () -> Void,
@@ -3623,12 +4169,19 @@ struct AppSettingsView: View {
         _draftAlertLeadMinutes = State(initialValue: initialAlertLeadMinutes)
         _draftCalendarNotificationsEnabled = State(initialValue: initialCalendarNotificationsEnabled)
         _draftLanguage = State(initialValue: initialLanguage)
+        _draftAppearance = State(initialValue: initialAppearance)
         _draftMeetingFocusEnabled = State(initialValue: initialMeetingFocusEnabled)
         _draftTeamsPresenceEnabled = State(initialValue: initialTeamsPresenceEnabled)
         _draftTeamsCallBlockEnabled = State(initialValue: initialTeamsCallBlockEnabled)
         _draftTeamsControlScrollBlockEnabled = State(initialValue: initialTeamsControlScrollBlockEnabled)
         _draftMailBadgeEnabled = State(initialValue: initialMailBadgeEnabled)
         _draftLaunchAtLoginEnabled = State(initialValue: initialLaunchAtLoginEnabled)
+        let cachedIconStatus = WorkspaceIconDownloadStore.cachedInstallStatus()
+        _iconInstallState = State(
+            initialValue: cachedIconStatus.downloaded == cachedIconStatus.total
+                ? .installed(cachedIconStatus.downloaded)
+                : .idle
+        )
         self.connectionState = connectionState
         self.isBusy = isBusy
         self.errorMessage = errorMessage
@@ -3637,6 +4190,7 @@ struct AppSettingsView: View {
         self.gmailErrorRecovery = gmailErrorRecovery
         self.currentCalendarNotificationsEnabled = currentCalendarNotificationsEnabled
         self.currentLanguage = currentLanguage
+        self.currentAppearance = currentAppearance
         self.currentMeetingFocusEnabled = currentMeetingFocusEnabled
         self.meetingFocusApprovalPending = meetingFocusApprovalPending
         self.meetingFocusStatusText = meetingFocusStatusText
@@ -3658,6 +4212,7 @@ struct AppSettingsView: View {
         self.onOpenNotificationSettings = onOpenNotificationSettings
         self.onOpenGitHub = onOpenGitHub
         self.onUpdateLanguage = onUpdateLanguage
+        self.onUpdateAppearance = onUpdateAppearance
         self.onUpdateAlertLeadMinutes = onUpdateAlertLeadMinutes
         self.onUpdateCalendarNotifications = onUpdateCalendarNotifications
         self.onSendTestCalendarNotification = onSendTestCalendarNotification
@@ -3701,7 +4256,7 @@ struct AppSettingsView: View {
             .padding(.top, 10)
             .padding(.bottom, 6)
 
-            ScrollView {
+            ScrollView(.vertical, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 10) {
                     if let (message, recovery) = activeError {
                         ErrorBanner(
@@ -3720,11 +4275,29 @@ struct AppSettingsView: View {
                             subtitle: text.languageSubtitle,
                             selection: languageBinding
                         )
+                        AppearancePickerRow(
+                            title: text.appearance,
+                            subtitle: text.appearanceSubtitle,
+                            language: currentLanguage,
+                            selection: appearanceBinding
+                        )
                         NotificationToggleRow(
                             title: text.openAtLogin,
                             subtitle: text.openAtLoginSubtitle,
                             systemImage: "power",
                             isOn: launchAtLoginBinding
+                        )
+                        WorkspaceIconDownloadSettingsRow(
+                            language: currentLanguage,
+                            state: iconInstallState,
+                            isDownloadEnabled: Bundle.main.workspaceIconDownloadsEnabled,
+                            action: installGoogleIcons
+                        )
+                        SettingsInfoRow(
+                            title: text.version,
+                            subtitle: text.versionSubtitle,
+                            value: AppVersionInfo.display,
+                            systemImage: "info.circle"
                         )
                     case .notifications:
                         NotificationToggleRow(
@@ -3796,11 +4369,11 @@ struct AppSettingsView: View {
                     case .account:
                         SettingsActionRow(
                             title: text.googleAccount,
-                            subtitle: connectionState.accountLine,
+                            subtitle: text.googleAccountLine(connectionState),
                             systemImage: "person.crop.circle",
                             buttonTitle: connectionState.isConnected
                                 ? text.signOut
-                                : text.s("Connect", "연결"),
+                                : text.s("Sign in with Google", "Google로 로그인"),
                             buttonRole: nil,
                             isDisabled: isGoogleAccountActionDisabled,
                             action: performGoogleAccountAction
@@ -3820,10 +4393,14 @@ struct AppSettingsView: View {
                 .padding(.bottom, 10)
             }
             .id(selectedSection)
+            .clipped()
 
         }
         .onChange(of: currentLanguage) { _, newValue in
             draftLanguage = newValue
+        }
+        .onChange(of: currentAppearance) { _, newValue in
+            draftAppearance = newValue
         }
         .onChange(of: currentCalendarNotificationsEnabled) { _, newValue in
             draftCalendarNotificationsEnabled = newValue
@@ -3894,6 +4471,16 @@ struct AppSettingsView: View {
             set: { newValue in
                 draftLanguage = newValue
                 onUpdateLanguage(newValue)
+            }
+        )
+    }
+
+    private var appearanceBinding: Binding<AppAppearance> {
+        Binding(
+            get: { draftAppearance },
+            set: { newValue in
+                draftAppearance = newValue
+                onUpdateAppearance(newValue)
             }
         )
     }
@@ -3973,6 +4560,25 @@ struct AppSettingsView: View {
             }
         )
     }
+
+    private func installGoogleIcons() {
+        iconInstallState = .installing
+        Task {
+            let result = await WorkspaceIconDownloadStore.shared.installAll()
+            await MainActor.run {
+                iconInstallState = result.downloaded == result.total
+                    ? .installed(result.downloaded)
+                    : .failed
+            }
+        }
+    }
+}
+
+private enum WorkspaceIconInstallState: Equatable {
+    case idle
+    case installing
+    case installed(Int)
+    case failed
 }
 
 struct WorkspaceAppsEditor: View {
@@ -3981,17 +4587,20 @@ struct WorkspaceAppsEditor: View {
     @State private var draggingAppID: String?
     @State private var lastAutoScrollAt = Date.distantPast
     private let initialApps: [WorkspaceApp]
+    let language: AppLanguage
     let onDone: () -> Void
     let onUpdateApps: ([WorkspaceApp]) -> Void
 
     init(
         initialApps: [WorkspaceApp],
+        language: AppLanguage,
         onDone: @escaping () -> Void,
         onUpdateApps: @escaping ([WorkspaceApp]) -> Void
     ) {
         _draftApps = State(initialValue: initialApps)
         _selectedAppID = State(initialValue: initialApps.first?.id)
         self.initialApps = initialApps
+        self.language = language
         self.onDone = onDone
         self.onUpdateApps = onUpdateApps
     }
@@ -3999,20 +4608,28 @@ struct WorkspaceAppsEditor: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
-                IconButton(symbolName: "xmark", title: "Cancel", action: onDone)
+                IconButton(symbolName: "xmark", title: text.cancel, action: onDone)
 
-                Text("Workspace")
+                Text(text.s("Workspace", "워크스페이스"))
                     .font(.system(size: 17, weight: .semibold))
 
-                Text("\(draftApps.filter(\.isEnabled).count) visible")
+                Text(visibleCountText)
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
 
                 Spacer()
 
-                IconButton(symbolName: "plus", title: "Add app", action: addCustomApp)
-                IconButton(symbolName: "arrow.counterclockwise", title: "Reset apps", action: resetDefaults)
-                Button("Save", action: saveAndDone)
+                IconButton(
+                    symbolName: "plus",
+                    title: text.s("Add app", "앱 추가"),
+                    action: addCustomApp
+                )
+                IconButton(
+                    symbolName: "arrow.counterclockwise",
+                    title: text.s("Reset apps", "앱 초기화"),
+                    action: resetDefaults
+                )
+                Button(text.s("Save", "저장"), action: saveAndDone)
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
                     .disabled(draftApps == initialApps)
@@ -4026,11 +4643,12 @@ struct WorkspaceAppsEditor: View {
                 ZStack {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 10) {
-                            SectionTitle("Workspace Apps")
+                            SectionTitle(text.s("Workspace Apps", "워크스페이스 앱"))
 
                             if let selectedIndex {
                                 WorkspaceAppDetailEditor(
                                     app: appBinding(selectedIndex),
+                                    language: language,
                                     canDelete: !draftApps[selectedIndex].isBuiltIn,
                                     canMoveUp: selectedIndex > 0,
                                     canMoveDown: selectedIndex < draftApps.count - 1,
@@ -4044,6 +4662,7 @@ struct WorkspaceAppsEditor: View {
 
                             WorkspaceAppsGridEditor(
                                 apps: $draftApps,
+                                language: language,
                                 selectedAppID: $selectedAppID,
                                 draggingAppID: $draggingAppID
                             )
@@ -4092,6 +4711,15 @@ struct WorkspaceAppsEditor: View {
         return draftApps.firstIndex(where: { $0.id == selectedAppID })
     }
 
+    private var text: AppText {
+        AppText(language: language)
+    }
+
+    private var visibleCountText: String {
+        let count = draftApps.filter(\.isEnabled).count
+        return language == .korean ? "\(count)개 표시" : "\(count) visible"
+    }
+
     private func saveAndDone() {
         onUpdateApps(draftApps)
         onDone()
@@ -4107,7 +4735,9 @@ struct WorkspaceAppsEditor: View {
     }
 
     private func addCustomApp() {
-        let app = WorkspaceApp.custom()
+        let app = WorkspaceApp.custom(
+            title: text.s("New App", "새 앱")
+        )
         draftApps.append(app)
         selectedAppID = app.id
     }
@@ -4158,6 +4788,7 @@ struct WorkspaceAppsEditor: View {
 struct WorkspaceAppsGridEditor: View {
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 8), count: 4)
     @Binding var apps: [WorkspaceApp]
+    let language: AppLanguage
     @Binding var selectedAppID: String?
     @Binding var draggingAppID: String?
 
@@ -4167,6 +4798,7 @@ struct WorkspaceAppsGridEditor: View {
                 if let index = apps.firstIndex(where: { $0.id == listedApp.id }) {
                     WorkspaceAppEditorTile(
                         app: apps[index],
+                        language: language,
                         isSelected: selectedAppID == listedApp.id,
                         isDragging: draggingAppID == listedApp.id,
                         canDelete: !apps[index].isBuiltIn,
@@ -4207,6 +4839,7 @@ struct WorkspaceAppsGridEditor: View {
 
 struct WorkspaceAppEditorTile: View {
     let app: WorkspaceApp
+    let language: AppLanguage
     let isSelected: Bool
     let isDragging: Bool
     let canDelete: Bool
@@ -4214,6 +4847,7 @@ struct WorkspaceAppEditorTile: View {
     let onToggleEnabled: () -> Void
     let onDelete: () -> Void
     let onDrag: () -> NSItemProvider
+    private var text: AppText { AppText(language: language) }
 
     var body: some View {
         VStack(spacing: 6) {
@@ -4221,7 +4855,7 @@ struct WorkspaceAppEditorTile: View {
                 .frame(width: 24, height: 24)
                 .frame(width: 36, height: 28)
 
-            Text(app.title.nilIfBlank ?? "Untitled")
+            Text(app.displayTitle(language: language).nilIfBlank ?? text.s("Untitled", "이름 없음"))
                 .font(.system(size: 11, weight: .medium))
                 .lineLimit(1)
                 .truncationMode(.tail)
@@ -4243,7 +4877,11 @@ struct WorkspaceAppEditorTile: View {
                     .frame(width: 20, height: 20)
             }
             .buttonStyle(.borderless)
-            .help(app.isEnabled ? "Hide app" : "Show app")
+            .help(
+                app.isEnabled
+                    ? text.s("Hide app", "앱 숨기기")
+                    : text.s("Show app", "앱 표시")
+            )
         }
         .overlay(alignment: .topTrailing) {
             if canDelete {
@@ -4253,15 +4891,16 @@ struct WorkspaceAppEditorTile: View {
                         .frame(width: 20, height: 20)
                 }
                 .buttonStyle(.borderless)
-                .help("Delete custom app")
+                .help(text.s("Delete custom app", "사용자 앱 삭제"))
             }
         }
-        .help("Click to edit. Drag to reorder.")
+        .help(text.s("Click to edit. Drag to reorder.", "클릭해서 편집하고 드래그해서 순서를 바꿉니다."))
     }
 }
 
 struct WorkspaceAppDetailEditor: View {
     @Binding var app: WorkspaceApp
+    let language: AppLanguage
     let canDelete: Bool
     let canMoveUp: Bool
     let canMoveDown: Bool
@@ -4270,6 +4909,7 @@ struct WorkspaceAppDetailEditor: View {
     let onMoveDown: () -> Void
     let onMoveToBottom: () -> Void
     let onDelete: () -> Void
+    private var text: AppText { AppText(language: language) }
 
     var body: some View {
         VStack(spacing: 8) {
@@ -4280,10 +4920,10 @@ struct WorkspaceAppDetailEditor: View {
                     .menuSurface(.inset)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(app.title.nilIfBlank ?? "Untitled")
+                    Text(app.displayTitle(language: language).nilIfBlank ?? text.s("Untitled", "이름 없음"))
                         .font(.system(size: 13, weight: .semibold))
                         .lineLimit(1)
-                    Text(app.urlString.nilIfBlank ?? "No URL")
+                    Text(app.urlString.nilIfBlank ?? text.s("No URL", "URL 없음"))
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -4292,32 +4932,48 @@ struct WorkspaceAppDetailEditor: View {
 
                 Spacer()
 
-                Toggle("Visible", isOn: binding(\.isEnabled))
+                Toggle(text.s("Visible", "표시"), isOn: binding(\.isEnabled))
                     .font(.system(size: 11, weight: .medium))
                     .toggleStyle(.switch)
             }
 
-            TextField("Name", text: binding(\.title))
+            TextField(text.s("Name", "이름"), text: binding(\.title))
                 .textFieldStyle(.roundedBorder)
 
             TextField("URL", text: binding(\.urlString))
                 .textFieldStyle(.roundedBorder)
 
             HStack(spacing: 4) {
-                IconButton(symbolName: "arrow.up.to.line", title: "Move to top", action: onMoveToTop)
+                IconButton(
+                    symbolName: "arrow.up.to.line",
+                    title: text.s("Move to top", "맨 위로"),
+                    action: onMoveToTop
+                )
                     .disabled(!canMoveUp)
-                IconButton(symbolName: "chevron.up", title: "Move up", action: onMoveUp)
+                IconButton(
+                    symbolName: "chevron.up",
+                    title: text.s("Move up", "위로"),
+                    action: onMoveUp
+                )
                     .disabled(!canMoveUp)
-                IconButton(symbolName: "chevron.down", title: "Move down", action: onMoveDown)
+                IconButton(
+                    symbolName: "chevron.down",
+                    title: text.s("Move down", "아래로"),
+                    action: onMoveDown
+                )
                     .disabled(!canMoveDown)
-                IconButton(symbolName: "arrow.down.to.line", title: "Move to bottom", action: onMoveToBottom)
+                IconButton(
+                    symbolName: "arrow.down.to.line",
+                    title: text.s("Move to bottom", "맨 아래로"),
+                    action: onMoveToBottom
+                )
                     .disabled(!canMoveDown)
 
                 Spacer()
 
                 if canDelete {
                     Button(role: .destructive, action: onDelete) {
-                        Label("Delete", systemImage: "trash")
+                        Label(text.s("Delete", "삭제"), systemImage: "trash")
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
@@ -4612,7 +5268,42 @@ struct WorkspaceApp: Identifiable, Codable, Equatable {
         return url.flatMap(NSImage.init(contentsOf:))
     }
 
+    func displayTitle(language: AppLanguage) -> String {
+        guard language == .korean,
+              isBuiltIn,
+              let defaultTitle = Self.defaultApps.first(where: { $0.id == id })?.title,
+              title == defaultTitle else {
+            return title
+        }
+
+        switch id {
+        case "calendar": return "캘린더"
+        case "drive": return "드라이브"
+        case "docs": return "문서"
+        case "sheets": return "스프레드시트"
+        case "slides": return "프레젠테이션"
+        case "forms": return "설문지"
+        case "sites": return "사이트"
+        case "tasks": return "할 일"
+        case "contacts": return "연락처"
+        case "groups": return "그룹"
+        case "search": return "검색"
+        case "account": return "계정"
+        case "maps": return "지도"
+        case "photos": return "포토"
+        case "translate": return "번역"
+        case "news": return "뉴스"
+        case "finance": return "금융"
+        default: return title
+        }
+    }
+
     private static func workspaceIconURL(named iconName: String) -> URL? {
+        if let cacheURL = WorkspaceIconDownloadStore.cachedURL(named: iconName),
+           FileManager.default.fileExists(atPath: cacheURL.path) {
+            return cacheURL
+        }
+
         for bundleURL in workspaceResourceBundleCandidates() {
             if let bundle = Bundle(url: bundleURL) {
                 if let url = bundle.url(forResource: iconName, withExtension: "png", subdirectory: "WorkspaceIcons")
@@ -4666,10 +5357,10 @@ struct WorkspaceApp: Identifiable, Codable, Equatable {
         )
     }
 
-    static func custom() -> WorkspaceApp {
+    static func custom(title: String = "New App") -> WorkspaceApp {
         WorkspaceApp(
             id: "custom-\(UUID().uuidString)",
-            title: "New App",
+            title: title,
             urlString: "https://",
             iconName: "custom",
             symbolName: "app",
@@ -5008,7 +5699,11 @@ struct GoogleOAuthConfiguration {
     let callbackScheme: String?
 
     var isComplete: Bool {
-        clientID != nil && callbackScheme != nil
+        // The publisher Client ID is the only runtime value GoogleSignIn needs
+        // to present the account chooser. Distribution builds validate and
+        // embed the matching callback scheme before signing, so a secondary
+        // Info.plist lookup must not hide the sign-in button.
+        clientID != nil
     }
 
     static var current: GoogleOAuthConfiguration {
@@ -6014,6 +6709,10 @@ enum AppError: LocalizedError, Sendable {
 }
 
 extension Bundle {
+    var workspaceIconDownloadsEnabled: Bool {
+        object(forInfoDictionaryKey: "GWSWorkspaceIconDownloadsEnabled") as? Bool ?? false
+    }
+
     var googleClientID: String? {
         guard let value = object(forInfoDictionaryKey: "GIDClientID") as? String,
               value.nilIfBlank != nil,

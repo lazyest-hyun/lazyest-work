@@ -20,39 +20,38 @@ struct StandaloneIcon {
 }
 
 let acceptedFlag = "--accept-google-brand-terms"
-let noInstallFlag = "--no-install"
-let noOpenFlag = "--no-open"
 let args = Set(CommandLine.arguments.dropFirst())
 guard args.contains(acceptedFlag) else {
     fputs("""
-    This script downloads Google product icon assets for local/internal use only,
-    then installs Lazyest Work into /Applications.
+    This script downloads Google product icon assets into Lazyest Work's
+    Application Support cache. It does not build, install, or modify the app.
 
     The public repository intentionally does not ship third-party brand assets.
     Before running this, review Google's brand/trademark rules and make sure your
     use is permitted:
 
-      https://about.google/brand-resource-center/products-and-services/
-      https://opensource.google/documentation/reference/using/trademarks
+      https://about.google/brand-resource-center/brand-elements/
+      https://about.google/brand-resource-center/guidance/apis/
 
-    To install with local, git-ignored Google app icons:
+    To download icons for an installed Lazyest Work release:
 
       swift scripts/sync-google-app-icons.swift \(acceptedFlag)
-
-    To sync icons without installing:
-
-      swift scripts/sync-google-app-icons.swift \(acceptedFlag) \(noInstallFlag)
 
     """, stderr)
     exit(64)
 }
 
 let launcherWidgetURL = URL(string: "https://ogs.google.com/widget/app/so?eom=1&awwd=1&em=2&origin=https%3A%2F%2Fwww.google.com&cn=app&pid=1&spid=1&hl=en")!
-let scriptURL = URL(fileURLWithPath: CommandLine.arguments[0], relativeTo: URL(fileURLWithPath: FileManager.default.currentDirectoryPath))
-    .standardizedFileURL
-let rootDirectory = scriptURL.deletingLastPathComponent().deletingLastPathComponent()
-let outputDirectory = rootDirectory
-    .appendingPathComponent("macos/LazyestWork/Sources/LazyestWork/Resources/WorkspaceIcons", isDirectory: true)
+guard let applicationSupportDirectory = FileManager.default.urls(
+    for: .applicationSupportDirectory,
+    in: .userDomainMask
+).first else {
+    fputs("Could not locate the user Application Support directory.\n", stderr)
+    exit(1)
+}
+let outputDirectory = applicationSupportDirectory
+    .appendingPathComponent("Lazyest Work", isDirectory: true)
+    .appendingPathComponent("WorkspaceIcons", isDirectory: true)
 let scale = 2
 let iconSize = 53 * scale
 
@@ -278,21 +277,4 @@ for icon in standaloneIcons {
     try writeDownloadedPNG(from: icon.url, to: outputDirectory.appendingPathComponent("\(icon.resourceName).png"))
 }
 
-print("Synced \(apps.count) Google app launcher icons from \(spriteURL.lastPathComponent) and \(standaloneIcons.count) standalone Google service icons into git-ignored local resources.")
-
-if !args.contains(noInstallFlag) {
-    let installScript = rootDirectory.appendingPathComponent("scripts/install-macos-app.sh")
-    let process = Process()
-    process.executableURL = installScript
-    process.arguments = args.contains(noOpenFlag) ? ["--no-open"] : []
-    try process.run()
-    process.waitUntilExit()
-
-    if process.terminationStatus != 0 {
-        throw NSError(
-            domain: "LazyestWorkIconSync",
-            code: Int(process.terminationStatus),
-            userInfo: [NSLocalizedDescriptionKey: "Install failed with exit code \(process.terminationStatus)"]
-        )
-    }
-}
+print("Synced \(apps.count) Google app launcher icons from \(spriteURL.lastPathComponent) and \(standaloneIcons.count) standalone Google service icons into \(outputDirectory.path).")

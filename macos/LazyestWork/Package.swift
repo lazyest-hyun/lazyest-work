@@ -29,7 +29,7 @@ let package = Package(
             ],
             path: "Sources/LazyestWork",
             resources: [
-                .process("Resources")
+                .process("Resources/FocusShortcuts")
             ]
         )
     ]

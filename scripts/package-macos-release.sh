@@ -18,11 +18,24 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || die "Required command is unavailable: $1"
 }
 
+run_apple_network_tool() {
+  env \
+    -u SSL_CERT_FILE \
+    -u CURL_CA_BUNDLE \
+    -u REQUESTS_CA_BUNDLE \
+    -u GIT_SSL_CAINFO \
+    -u NODE_EXTRA_CA_CERTS \
+    -u AWS_CA_BUNDLE \
+    -u M2T_AWS_CA_BUNDLE \
+    -u M2T_DOCKER_EXTRA_CA_CERTS \
+    "$@"
+}
+
 staple_with_retry() {
   local target="$1"
   local attempt
   for attempt in 1 2 3; do
-    if xcrun stapler staple "$target"; then
+    if run_apple_network_tool xcrun stapler staple "$target"; then
       return
     fi
     if ((attempt < 3)); then
@@ -89,10 +102,10 @@ mkdir -p "$(dirname "$PKG_PATH")"
 # notarytool receives a ZIP of the signed, unstapled app.
 rm -f "$ZIP_PATH"
 ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "$ZIP_PATH"
-xcrun notarytool submit "$ZIP_PATH" --keychain-profile "$NOTARY_PROFILE" --wait
+run_apple_network_tool xcrun notarytool submit "$ZIP_PATH" --keychain-profile "$NOTARY_PROFILE" --wait
 
 staple_with_retry "$APP_DIR"
-if ! xcrun stapler validate "$APP_DIR"; then
+if ! run_apple_network_tool xcrun stapler validate "$APP_DIR"; then
   echo "warning: stapler validation could not reach Apple's ticket service; continuing to required Gatekeeper assessment" >&2
 fi
 codesign --verify --deep --strict --verbose=4 "$APP_DIR"
@@ -109,9 +122,9 @@ pkgbuild \
   --sign "$INSTALLER_IDENTITY" \
   "$PKG_PATH"
 pkgutil --check-signature "$PKG_PATH" >/dev/null
-xcrun notarytool submit "$PKG_PATH" --keychain-profile "$NOTARY_PROFILE" --wait
+run_apple_network_tool xcrun notarytool submit "$PKG_PATH" --keychain-profile "$NOTARY_PROFILE" --wait
 staple_with_retry "$PKG_PATH"
-if ! xcrun stapler validate "$PKG_PATH"; then
+if ! run_apple_network_tool xcrun stapler validate "$PKG_PATH"; then
   echo "warning: stapler validation could not reach Apple's PKG ticket service; continuing to required Installer Gatekeeper assessment" >&2
 fi
 spctl --assess --type install --verbose=4 "$PKG_PATH"

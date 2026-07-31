@@ -11,11 +11,14 @@ APP_ICON="$PACKAGE_DIR/Assets/AppIcon.icns"
 BUNDLE_ID="${GWS_BUNDLE_ID:-com.lazyest.work}"
 GOOGLE_CLIENT_ID="${GWS_GOOGLE_CLIENT_ID:-}"
 GOOGLE_REVERSED_CLIENT_ID="${GWS_GOOGLE_REVERSED_CLIENT_ID:-}"
+GOOGLE_PRODUCT_ICON_DOWNLOADS="${GWS_GOOGLE_PRODUCT_ICON_DOWNLOADS:-1}"
 MICROSOFT_CLIENT_ID="${GWS_MICROSOFT_CLIENT_ID:-}"
 MICROSOFT_TENANT_ID="${GWS_MICROSOFT_TENANT_ID:-organizations}"
 MICROSOFT_REDIRECT_SCHEME="msauth.$BUNDLE_ID"
 CODE_SIGN_IDENTITY="${GWS_CODESIGN_IDENTITY:-}"
 BUILD_MODE="${GWS_BUILD_MODE:-local}"
+APP_VERSION="${GWS_APP_VERSION:-$(tr -d '[:space:]' < "$ROOT_DIR/VERSION")}"
+APP_BUILD_NUMBER="${GWS_APP_BUILD_NUMBER:-$(tr -d '[:space:]' < "$ROOT_DIR/BUILD_NUMBER")}"
 # Reuse the established local signing identity when available. Changing the
 # bundle identifier still requires fresh macOS privacy grants after migration.
 LOCAL_CODE_SIGN_IDENTITY="GWS Menu Local Code Signing"
@@ -36,6 +39,9 @@ Environment:
   GWS_BUILD_MODE=local|distribution
   GWS_GOOGLE_CLIENT_ID=<publisher-owned Apple OAuth client ID>
   GWS_GOOGLE_REVERSED_CLIENT_ID=<optional; derived from the client ID when omitted>
+  GWS_GOOGLE_PRODUCT_ICON_DOWNLOADS=0|1 (default: 1)
+  GWS_APP_VERSION=<optional override for VERSION>
+  GWS_APP_BUILD_NUMBER=<optional override for BUILD_NUMBER>
 USAGE
 }
 
@@ -65,6 +71,25 @@ case "$BUILD_MODE" in
     exit 64
     ;;
 esac
+
+case "$GOOGLE_PRODUCT_ICON_DOWNLOADS" in
+  0|1)
+    ;;
+  *)
+    echo "GWS_GOOGLE_PRODUCT_ICON_DOWNLOADS must be 0 or 1." >&2
+    exit 64
+    ;;
+esac
+
+if [[ ! "$APP_VERSION" =~ ^[0-9]+(\.[0-9]+){2}$ ]]; then
+  echo "App version must use major.minor.patch format (got: $APP_VERSION)." >&2
+  exit 64
+fi
+
+if [[ ! "$APP_BUILD_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
+  echo "App build number must be a positive integer (got: $APP_BUILD_NUMBER)." >&2
+  exit 64
+fi
 
 case "$CODE_SIGN_IDENTITY" in
   -|ad-hoc|adhoc)
@@ -207,6 +232,12 @@ $MICROSOFT_URL_TYPE
   </array>"
 fi
 
+if [[ "$GOOGLE_PRODUCT_ICON_DOWNLOADS" -eq 1 ]]; then
+  GOOGLE_PRODUCT_ICON_DOWNLOADS_PLIST_VALUE="<true/>"
+else
+  GOOGLE_PRODUCT_ICON_DOWNLOADS_PLIST_VALUE="<false/>"
+fi
+
 cat > "$CONTENTS_DIR/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -225,9 +256,11 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.4.0</string>
+  <string>$APP_VERSION</string>
   <key>CFBundleVersion</key>
-  <string>13</string>
+  <string>$APP_BUILD_NUMBER</string>
+  <key>GWSWorkspaceIconDownloadsEnabled</key>
+  $GOOGLE_PRODUCT_ICON_DOWNLOADS_PLIST_VALUE
 $GOOGLE_PLIST_KEYS
 $MICROSOFT_PLIST_KEYS
 $URL_TYPES_PLIST

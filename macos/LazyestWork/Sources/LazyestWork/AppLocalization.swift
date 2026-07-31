@@ -33,6 +33,44 @@ enum AppLanguageSettings {
     }
 }
 
+enum AppAppearance: String, CaseIterable, Identifiable {
+    case system
+    case light
+    case dark
+
+    var id: String { rawValue }
+
+    func displayName(language: AppLanguage) -> String {
+        let text = AppText(language: language)
+        switch self {
+        case .system:
+            return text.s("System", "시스템")
+        case .light:
+            return text.s("Light", "라이트")
+        case .dark:
+            return text.s("Dark", "다크")
+        }
+    }
+}
+
+enum AppAppearanceSettings {
+    private static let appearanceKey = "appAppearance"
+
+    static func load() -> AppAppearance {
+        guard let value = UserDefaults.standard.string(forKey: appearanceKey),
+              let appearance = AppAppearance(rawValue: value) else {
+            // Lazyest Work's dark presentation is the product default even
+            // when macOS itself uses the light appearance.
+            return .dark
+        }
+        return appearance
+    }
+
+    static func save(_ appearance: AppAppearance) {
+        UserDefaults.standard.set(appearance.rawValue, forKey: appearanceKey)
+    }
+}
+
 struct AppText {
     let language: AppLanguage
 
@@ -46,6 +84,10 @@ struct AppText {
     var notifications: String { s("Calendar & Mail", "캘린더·메일") }
     var languageLabel: String { s("Language", "언어") }
     var languageSubtitle: String { s("Choose the app display language.", "앱 표시 언어를 선택합니다.") }
+    var appearance: String { s("Appearance", "화면 모드") }
+    var appearanceSubtitle: String { s("Choose the app appearance independently from macOS.", "macOS 화면 모드와 별도로 앱 화면을 선택합니다.") }
+    var version: String { s("Version", "버전") }
+    var versionSubtitle: String { s("Installed app version and build number.", "설치된 앱 버전과 빌드 번호입니다.") }
     var openAtLogin: String { s("Open at login", "로그인 시 열기") }
     var openAtLoginSubtitle: String { s("Start Lazyest Work when you sign in to macOS.", "macOS 로그인 시 Lazyest Work를 시작합니다.") }
     var githubRepository: String { s("GitHub repository", "GitHub 저장소") }
